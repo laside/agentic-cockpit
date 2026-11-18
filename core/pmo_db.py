@@ -59,9 +59,19 @@ def parse_toml_text(text: str) -> dict[str, Any]:
     return root
 
 
+def normalize_rel_path(path: str) -> str:
+    """Normalise un chemin relatif : strip, « \\ » remplacé par « / », préfixe « ./ » retiré."""
+    return path.strip().replace("\\", "/").removeprefix("./")
+
+
 def is_secret_or_forbidden_path(rel_path: str) -> bool:
-    """Mitigation #1 (T-104) : Bloque strictement .env (sauf .env.example), secrets/ et exclusion.key."""
-    norm = rel_path.strip().replace("\\", "/").removeprefix("./")
+    """Mitigation #1 (T-104) : Bloque strictement .env (sauf .env.example), secrets/, exclusion.key, chemins absolus et '..'."""
+    raw = rel_path.strip().replace("\\", "/")
+    if raw.startswith("/"):
+        return True
+    norm = normalize_rel_path(raw)
+    if ".." in norm.split("/"):
+        return True
     if norm.endswith(".env.example"):
         return False
     for pat in FORBIDDEN_SECRET_PATTERNS:
@@ -375,6 +385,17 @@ class CockpitDB:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def recent_runs_by_lane(self, provider: str, hours: float = 5.0) -> dict[str, int]:
+        """Nombre de runs par voie pour ce provider sur les `hours` dernières heures."""
+        window = f"-{float(hours)} hours"
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT lane, COUNT(*) AS n FROM runs WHERE provider = ? "
+                "AND created_at >= datetime('now', ?) GROUP BY lane",
+                (provider, window),
+            ).fetchall()
+        return {r["lane"]: int(r["n"]) for r in rows}
+
     def record_run(self, project_id: str, ticket_id: str, **fields: Any) -> None:
         cols = ", ".join(fields)
         marks = ", ".join("?" for _ in fields)
@@ -385,9 +406,12 @@ class CockpitDB:
             )
 
     def acquire_locks(self, project_id: str, ticket_id: str, files: list[str]) -> tuple[bool, list[str]]:
+        norm_files = [normalize_rel_path(f) for f in files]
         conflicts: list[str] = []
-        with self._connect() as conn:
-            for f in files:
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for f in norm_files:
                 row = conn.execute(
                     "SELECT ticket_id FROM file_locks WHERE project_id = ? AND file_path = ?",
                     (project_id, f),
@@ -395,13 +419,20 @@ class CockpitDB:
                 if row and row["ticket_id"] != ticket_id:
                     conflicts.append(f"{f} (verrouillé par {row['ticket_id']})")
             if conflicts:
+                conn.rollback()
                 return False, conflicts
-            for f in files:
+            for f in norm_files:
                 conn.execute(
-                    "INSERT OR REPLACE INTO file_locks (project_id, file_path, ticket_id) VALUES (?, ?, ?)",
+                    "INSERT OR IGNORE INTO file_locks (project_id, file_path, ticket_id) VALUES (?, ?, ?)",
                     (project_id, f, ticket_id),
                 )
-        return True, []
+            conn.commit()
+            return True, []
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def complete_and_merge_ticket(self, project_id: str, ticket_id: str) -> list[str]:
         unblocked: list[str] = []

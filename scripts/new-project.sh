@@ -5,25 +5,36 @@ set -euo pipefail
 HOME="${HOME:-/tmp}"
 PROJ_ID="${1:-}"
 [ -n "$PROJ_ID" ] || { echo "Usage: new-project.sh <id_projet> [chemin_racine] [port_sidecar]" >&2; exit 1; }
-[[ "$PROJ_ID" =~ ^[a-z0-9_-]+$ ]] || { echo "Identifiant invalide" >&2; exit 1; }
+[[ "$PROJ_ID" =~ ^[a-z][a-z0-9-]*$ ]] || { echo "Identifiant de projet invalide : $PROJ_ID (attendu: ^[a-z][a-z0-9-]*$)" >&2; exit 1; }
 
 COCKPIT_HOME="${COCKPIT_HOME:-$HOME/agentic-cockpit}"
 PROJECTS_TOML="${PROJECTS_TOML:-$COCKPIT_HOME/config/projects.toml}"
 PROJ_ROOT="${2:-$HOME/projets/$PROJ_ID}"
 SIDECAR_PORT="${3:-8790}"
+if ! [[ "$SIDECAR_PORT" =~ ^[0-9]+$ ]] || [ "$SIDECAR_PORT" -lt 1024 ] || [ "$SIDECAR_PORT" -gt 65535 ]; then
+  echo "Port sidecar invalide : $SIDECAR_PORT (attendu: entier de 1024 à 65535)" >&2
+  exit 1
+fi
 WT_SESS="${PROJ_ROOT}-worktrees"
 WT_TICK="${PROJ_ROOT}-worktrees"
 MIRROR_DIR="/mnt/c/Projets/$PROJ_ID"
 DB_PATH="${DB_PATH:-$COCKPIT_HOME/db/cockpit_pmo.db}"
 
-python3 - << PY
+COCKPIT_HOME="$COCKPIT_HOME" PROJECTS_TOML="$PROJECTS_TOML" PROJ_ID="$PROJ_ID" \
+PROJ_ROOT="$PROJ_ROOT" WT_SESS="$WT_SESS" WT_TICK="$WT_TICK" SIDECAR_PORT="$SIDECAR_PORT" \
+python3 - << 'PY'
+import os
 import sys
 from pathlib import Path
-sys.path.insert(0, "$COCKPIT_HOME/core")
+sys.path.insert(0, os.path.join(os.environ["COCKPIT_HOME"], "core"))
 from pmo_db import validate_projects_ports
 
-toml_path = Path("$PROJECTS_TOML")
-proj_id = "$PROJ_ID"
+toml_path = Path(os.environ["PROJECTS_TOML"])
+proj_id = os.environ["PROJ_ID"]
+proj_root = os.environ["PROJ_ROOT"]
+wt_sess = os.environ["WT_SESS"]
+wt_tick = os.environ["WT_TICK"]
+sidecar_port = os.environ["SIDECAR_PORT"]
 original = toml_path.read_text(encoding="utf-8") if toml_path.exists() else ""
 header = f"[projects.{proj_id}]"
 added = False
@@ -31,15 +42,15 @@ if header not in original:
     block = (
         f"\n[projects.{proj_id}]\n"
         f'name = "{proj_id.capitalize()}"\n'
-        f'root = "$PROJ_ROOT"\n'
-        f'worktrees_sessions_dir = "$WT_SESS"\n'
-        f'worktrees_tickets_dir = "$WT_TICK"\n'
+        f'root = "{proj_root}"\n'
+        f'worktrees_sessions_dir = "{wt_sess}"\n'
+        f'worktrees_tickets_dir = "{wt_tick}"\n'
         f'default_branch = "main"\n'
         f'milestones = ["M1", "M2", "M3"]\n'
         f'lint_cmd = "make lint"\n'
         f'test_unit_cmd = "make test"\n'
         f"\n[projects.{proj_id}.ports]\n"
-        f"sidecar = int_port\n".replace("int_port", "$SIDECAR_PORT")
+        f"sidecar = {sidecar_port}\n"
     )
     sep = "" if (not original or original.endswith("\n")) else "\n"
     toml_path.parent.mkdir(parents=True, exist_ok=True)
@@ -136,25 +147,30 @@ for agent in claude agy deepseek; do
   fi
 done
 
-python3 - << PY
+COCKPIT_HOME="$COCKPIT_HOME" DB_PATH="$DB_PATH" PROJ_ID="$PROJ_ID" PROJ_ROOT="$PROJ_ROOT" \
+WT_SESS="$WT_SESS" WT_TICK="$WT_TICK" MIRROR_DIR="$MIRROR_DIR" SIDECAR_PORT="$SIDECAR_PORT" \
+python3 - << 'PY'
+import os
 import sys
 from pathlib import Path
-sys.path.insert(0, "$COCKPIT_HOME/core")
+sys.path.insert(0, os.path.join(os.environ["COCKPIT_HOME"], "core"))
 from pmo_db import CockpitDB
 
-db = CockpitDB(Path("$DB_PATH"))
+proj_id = os.environ["PROJ_ID"]
+proj_root = os.environ["PROJ_ROOT"]
+db = CockpitDB(Path(os.environ["DB_PATH"]))
 db.register_project(
-    proj_id="$PROJ_ID",
-    name="$PROJ_ID".capitalize(),
-    root_path="$PROJ_ROOT",
-    wt_sessions_dir="$WT_SESS",
-    wt_tickets_dir="$WT_TICK",
+    proj_id=proj_id,
+    name=proj_id.capitalize(),
+    root_path=proj_root,
+    wt_sessions_dir=os.environ["WT_SESS"],
+    wt_tickets_dir=os.environ["WT_TICK"],
     default_branch="main",
-    mirror_dir="$MIRROR_DIR",
-    sidecar_port=int("$SIDECAR_PORT"),
+    mirror_dir=os.environ["MIRROR_DIR"],
+    sidecar_port=int(os.environ["SIDECAR_PORT"]),
     milestones=[("M1", "Fondations & Socle"), ("M2", "Fonctionnalités Cœur"), ("M3", "Stabilisation & Prod")],
 )
-db.export_markdown_roadmap("$PROJ_ID", Path("$PROJ_ROOT/docs/ROADMAP.md"))
+db.export_markdown_roadmap(proj_id, Path(proj_root) / "docs" / "ROADMAP.md")
 PY
 
 echo "OK : Nouveau projet '$PROJ_ID' initialisé dans $PROJ_ROOT (worktrees + SQLite PMO prêts)."

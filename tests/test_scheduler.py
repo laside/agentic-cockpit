@@ -193,6 +193,30 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(should_stop(done=2, escalations_in_a_row=3, max_tickets=6, max_escalations=2), "escalades")
         self.assertIsNone(should_stop(done=5, escalations_in_a_row=1, max_tickets=6, max_escalations=2))
 
+    def test_normalized_relative_paths_conflict_in_batch_and_locks(self) -> None:
+        """(d) « ./shared.py » et « shared.py » ne sont jamais dans le même lot."""
+        self.db.set_mistral_key_active(True)
+        self.db.upsert_ticket(
+            self.project_id,
+            "T-001",
+            "Ticket avec ./shared.py",
+            priority="P0",
+            complexity="S",
+            state="READY",
+            files_owned=["./shared.py"],
+        )
+        self.db.upsert_ticket(
+            self.project_id,
+            "T-002",
+            "Ticket avec shared.py",
+            priority="P1",
+            complexity="S",
+            state="READY",
+            files_owned=["shared.py"],
+        )
+        batch = plan_batch(self.db, self.project_id, slots=2)
+        self.assertEqual([item["id"] for item in batch], ["T-001"])
+
 
 if __name__ == "__main__":
     unittest.main()

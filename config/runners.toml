@@ -9,6 +9,8 @@ max_attempts = 3         # tentatives avant escalade vers l'utilisateur
 gate_timeout_s = 600     # durée maximale de lint + tests (Porte 0)
 gate1_timeout_s = 300    # durée maximale de l'audit NAS (Porte 1)
 usd_to_eur = 0.92        # taux de conversion USD -> EUR pour le suivi des coûts
+# Porte 1 statique, 0 token : un ticket qui touche du code source doit aussi toucher un test.
+require_tests = true
 
 [runners.deepseek_coder]
 agent = "deepseek"
@@ -20,11 +22,25 @@ argv = ["opencode", "run", "--model", "deepseek/deepseek-flash", "{prompt}"]
 [runners.agy_standard]
 agent = "agy"
 provider = "agy"
+cost_source = "estimate"
+# valeurs à calibrer : estimation forfaitaire par run, pas une mesure
+window_pct_per_run = 4.0
+window_hours = 5.0
+estimated_cost_eur = 0.0
+estimated_tokens_in = 0
+estimated_tokens_out = 0
 argv = ["agy", "--print", "{prompt}", "--mode", "accept-edits"]
 
 [runners.agy_argon]
 agent = "agy"
 provider = "agy"
+cost_source = "estimate"
+# valeurs à calibrer : estimation forfaitaire par run, pas une mesure
+window_pct_per_run = 12.0
+window_hours = 5.0
+estimated_cost_eur = 0.0
+estimated_tokens_in = 0
+estimated_tokens_out = 0
 # Nom exact attendu par `agy --model` (voir la liste affichée par agy en cas de nom inconnu).
 argv = ["agy", "--model", "Gemini 4 Argon (High)", "--print", "{prompt}", "--mode", "accept-edits"]
 

@@ -5,6 +5,11 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+try:
+    from core.pmo_db import normalize_rel_path
+except ImportError:
+    from pmo_db import normalize_rel_path  # type: ignore[no-redef]
+
 if TYPE_CHECKING:
     from core.pmo_db import CockpitDB
 
@@ -25,7 +30,7 @@ def plan_batch(db: CockpitDB, project_id: str, slots: int = 2) -> list[dict[str,
 
     locks_by_file: dict[str, set[str]] = {}
     for row in rows:
-        locks_by_file.setdefault(row["file_path"], set()).add(row["ticket_id"])
+        locks_by_file.setdefault(normalize_rel_path(row["file_path"]), set()).add(row["ticket_id"])
 
     queue = db.get_prioritized_queue(project_id)
     batch: list[dict[str, Any]] = []
@@ -49,7 +54,7 @@ def plan_batch(db: CockpitDB, project_id: str, slots: int = 2) -> list[dict[str,
         else:
             files = list(raw_files)
 
-        files = [f for f in files if f]
+        files = [normalize_rel_path(f) for f in files if f and normalize_rel_path(f)]
         if not files:
             continue
 

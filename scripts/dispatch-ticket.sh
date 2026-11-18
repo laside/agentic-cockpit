@@ -8,6 +8,8 @@ DB_PATH="${DB_PATH:-$COCKPIT_HOME/db/cockpit_pmo.db}"
 TICKET="${1:-}"
 PROJECT="${2:-${PROJECT:-}}"
 [ -n "$TICKET" ] && [ -n "$PROJECT" ] || { echo "Usage: cockpit dispatch T-xxx <projet>" >&2; exit 1; }
+[[ "$TICKET" =~ ^T-[0-9]+$ ]] || { echo "Identifiant de ticket invalide : $TICKET (attendu: ^T-[0-9]+$)" >&2; exit 1; }
+[[ "$PROJECT" =~ ^[a-z][a-z0-9-]*$ ]] || { echo "Identifiant de projet invalide : $PROJECT (attendu: ^[a-z][a-z0-9-]*$)" >&2; exit 1; }
 SESSION="${ZELLIJ_SESSION_NAME:-cockpit-$PROJECT}"
 
 # Voie recommandée -> préfixe du titre du panneau. Séparateur tabulation : les titres contiennent des espaces.

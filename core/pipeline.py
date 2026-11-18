@@ -34,7 +34,12 @@ sys.path.insert(0, str(CORE))
 import costs  # noqa: E402
 import scheduler  # noqa: E402
 from context_compiler import compile_ticket_brief  # noqa: E402
-from gatekeeper import build_nas_gate1_payload, sieve_test_output, verify_worktree_scope  # noqa: E402
+from gatekeeper import (  # noqa: E402
+    build_nas_gate1_payload,
+    check_tests_present,
+    sieve_test_output,
+    verify_worktree_scope,
+)
 from pmo_db import CockpitDB  # noqa: E402
 
 DB_PATH = Path(os.environ.get("DB_PATH", COCKPIT_HOME / "db" / "cockpit_pmo.db"))
@@ -112,28 +117,31 @@ def changed_files(wt: Path, base: str) -> list[str]:
 
 # ───────────────────────────── worktree & brief ─────────────────────────────
 
+_GIT_WORKTREE_LOCK = threading.Lock()
+
 
 def ensure_worktree(proj: dict[str, Any], ticket_id: str) -> Path:
     root = Path(proj["root_path"])
     wt = Path(proj["wt_tickets_dir"]) / ticket_id
     branch = f"feat/{ticket_id}"
-    if wt.exists():
+    with _GIT_WORKTREE_LOCK:
+        if wt.exists():
+            return wt
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        has_branch = sh(["git", "rev-parse", "--verify", "--quiet", branch], root, check=False).returncode == 0
+        args = ["git", "worktree", "add", str(wt)] + ([branch] if has_branch else ["-b", branch])
+        sh(args, root)
+        agents = root / ".agents"
+        if agents.exists() and not (wt / ".agents").exists():
+            (wt / ".agents").symlink_to(agents)
+        # Le brief ne doit jamais être commité ni compté comme modification du worker.
+        exclude = root / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        missing = [p for p in (BRIEF_NAME, ".agents") if p not in current.splitlines()]
+        if missing:
+            exclude.write_text(current.rstrip("\n") + "\n" + "\n".join(missing) + "\n", encoding="utf-8")
         return wt
-    wt.parent.mkdir(parents=True, exist_ok=True)
-    has_branch = sh(["git", "rev-parse", "--verify", "--quiet", branch], root, check=False).returncode == 0
-    args = ["git", "worktree", "add", str(wt)] + ([branch] if has_branch else ["-b", branch])
-    sh(args, root)
-    agents = root / ".agents"
-    if agents.exists() and not (wt / ".agents").exists():
-        (wt / ".agents").symlink_to(agents)
-    # Le brief ne doit jamais être commité ni compté comme modification du worker.
-    exclude = root / ".git" / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-    missing = [p for p in (BRIEF_NAME, ".agents") if p not in current.splitlines()]
-    if missing:
-        exclude.write_text(current.rstrip("\n") + "\n" + "\n".join(missing) + "\n", encoding="utf-8")
-    return wt
 
 
 def write_brief(ticket: dict[str, Any], wt: Path) -> Path:
@@ -336,6 +344,25 @@ def run_ticket(db: CockpitDB, project_id: str, ticket_id: str, lane_override: st
             if cost_eur > 0:
                 db.update_quota_usage(runner["provider"], add_spent_eur=cost_eur)
             say(f"{ticket_id} : coût {cost_eur:.4f} € (tokens in={d['input_tokens']}, out={d['output_tokens']})")
+        elif runner.get("cost_source") == "estimate":
+            provider = runner.get("provider", "")
+            window_hours = float(runner.get("window_hours", 5.0))
+            recent = db.recent_runs_by_lane(provider, window_hours)
+            pct = 0.0
+            for other_lane, other_cfg in cfg["runners"].items():
+                if other_cfg.get("provider") == provider and other_cfg.get("cost_source") == "estimate":
+                    pct += recent.get(other_lane, 0) * float(other_cfg.get("window_pct_per_run", 0.0))
+            # Le run en cours n'est pas encore enregistré : on l'ajoute à la jauge glissante.
+            pct = min(pct + float(runner.get("window_pct_per_run", 0.0)), 100.0)
+            estimated_cost = float(runner.get("estimated_cost_eur", 0.0))
+            run_fields["tokens_in"] = int(runner.get("estimated_tokens_in", 0))
+            run_fields["tokens_out"] = int(runner.get("estimated_tokens_out", 0))
+            run_fields["cost_eur"] = estimated_cost
+            db.update_quota_usage(provider, window_used_pct=pct)
+            if estimated_cost > 0:
+                db.update_quota_usage(provider, add_spent_eur=estimated_cost)
+            say(f"{ticket_id} : coût estimé {estimated_cost:.4f} € (estimation, fenêtre {window_hours:g} h"
+                f" à {pct:.1f} %), tokens in={run_fields['tokens_in']}, out={run_fields['tokens_out']}")
         if g0 == "SECRET":
             db.record_run(project_id, ticket_id, **run_fields)
             db.update_ticket(project_id, ticket_id, state="GATE2")
@@ -359,6 +386,18 @@ def run_ticket(db: CockpitDB, project_id: str, ticket_id: str, lane_override: st
             feedback = g0_feedback
             continue
         say(f"{ticket_id} : Porte 0 OK ({len(changed)} fichier(s) : {', '.join(changed)})")
+
+        # Porte 1 statique (0 token) : un ticket qui touche du code source doit aussi toucher un test.
+        if defaults.get("require_tests", False):
+            ok, msg = check_tests_present(changed, files_owned)
+            if not ok:
+                run_fields["gate1"] = "STATIC_FAIL"
+                db.record_run(project_id, ticket_id, **run_fields)
+                db.update_ticket(project_id, ticket_id, fail_count=ticket["fail_count"] + 1)
+                db.add_event(project_id, ticket_id, "GATE1_STATIC_FAIL", msg[:300])
+                say(f"{ticket_id} : Porte 1 statique refusée — {msg}")
+                feedback = msg
+                continue
 
         # Indexe uniquement les fichiers du périmètre, puis audite le diff complet depuis la base.
         sh(["git", "add", "--", *changed], wt)
@@ -524,7 +563,8 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
     done = 0
     escalations_in_a_row = 0
     while True:
-        batch = scheduler.plan_batch(db, projet, args.slots)
+        slots = min(args.slots, args.max_tickets - done)
+        batch = scheduler.plan_batch(db, projet, slots)
         if not batch:
             say("Plus de ticket exécutable")
             return 0
@@ -541,8 +581,15 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
                 results[tid] = run_ticket(
                     db, projet, tid, max_attempts=args.max_attempts, use_gate1=bool(args.gate1)
                 )
-            except PipelineError as exc:
-                say(str(exc))
+            except Exception as exc:
+                say(f"Erreur dans le worker du ticket {tid} : {exc}")
+                try:
+                    db.add_event(projet, tid, "WORKER_CRASH", str(exc)[:300])
+                    t_cur = db.get_ticket(projet, tid)
+                    if t_cur and t_cur.get("state") in ("ASSIGNED", "GATE0", "GATE1"):
+                        db.update_ticket(projet, tid, state="READY")
+                except Exception:
+                    pass
                 results[tid] = 1
 
         threads = [threading.Thread(target=_worker, args=(item["id"],)) for item in batch]
@@ -551,13 +598,13 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
         for t in threads:
             t.join()
 
-        for item in batch:
-            code = results.get(item["id"], 1)
-            if code == 0:
-                done += 1
-                escalations_in_a_row = 0
-            else:
-                escalations_in_a_row += 1
+        successes = sum(1 for item in batch if results.get(item["id"], 1) == 0)
+        failures = len(batch) - successes
+        done += successes
+        if failures > 0:
+            escalations_in_a_row += failures
+        else:
+            escalations_in_a_row = 0
 
         if args.auto_merge:
             for item in batch:

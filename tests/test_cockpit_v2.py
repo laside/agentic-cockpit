@@ -33,11 +33,38 @@ class TestAgenticCockpitV2(unittest.TestCase):
         self.assertTrue(pmo_db.is_secret_or_forbidden_path("backend/.env.local"))
         self.assertTrue(pmo_db.is_secret_or_forbidden_path("secrets/db_url"))
         self.assertTrue(pmo_db.is_secret_or_forbidden_path("/mnt/c/Projets/mon-app/secrets/exclusion.key"))
+        self.assertTrue(pmo_db.is_secret_or_forbidden_path("../x.py"))
+        self.assertTrue(pmo_db.is_secret_or_forbidden_path("a/../../x.py"))
+        self.assertTrue(pmo_db.is_secret_or_forbidden_path("/etc/passwd"))
         self.assertFalse(pmo_db.is_secret_or_forbidden_path(".env.example"))
+        self.assertFalse(pmo_db.is_secret_or_forbidden_path("backend/src/app/api.py"))
         self.assertFalse(pmo_db.is_secret_or_forbidden_path("backend/src/app/api.py"))
 
         collisions = pmo_db.validate_projects_ports(COCKPIT_ROOT / "config/projects.toml")
         self.assertEqual(collisions, [], f"Collisions de ports détectées : {collisions}")
+
+    def test_01b_acquire_locks_normalization_and_no_lock_stealing(self) -> None:
+        """(e) acquire_locks : conflit détecté entre « ./a.py » et « a.py », et un second ticket ne peut pas voler le verrou."""
+        ok1, conflicts1 = self.db.acquire_locks("demo", "T-001", ["./a.py"])
+        self.assertTrue(ok1)
+        self.assertEqual(conflicts1, [])
+
+        ok2, conflicts2 = self.db.acquire_locks("demo", "T-002", ["a.py"])
+        self.assertFalse(ok2)
+        self.assertEqual(conflicts2, ["a.py (verrouillé par T-001)"])
+
+        # Ré-acquisition idempotente par le même ticket
+        ok3, conflicts3 = self.db.acquire_locks("demo", "T-001", ["a.py"])
+        self.assertTrue(ok3)
+        self.assertEqual(conflicts3, [])
+
+        # Vérifie que T-001 détient toujours le verrou dans la base
+        with self.db._connect() as conn:
+            row = conn.execute(
+                "SELECT ticket_id FROM file_locks WHERE project_id = 'demo' AND file_path = 'a.py'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["ticket_id"], "T-001")
 
     def test_02_quota_governor_mistral_standby_and_argon_escalation(self) -> None:
         route_xs = self.db.select_optimal_lane(complexity="XS", priority="P2")

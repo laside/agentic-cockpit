@@ -67,7 +67,18 @@ case "$SUBCMD" in
       git worktree remove --force "$wt_path"
     fi
     git branch -D "feat/$T" >/dev/null 2>&1 || true
-    python3 -c "import sys; sys.path.insert(0, '$COCKPIT_HOME/core'); from pmo_db import CockpitDB; from pathlib import Path; db=CockpitDB(Path('$COCKPIT_HOME/db/cockpit_pmo.db')); db.complete_and_merge_ticket('$PROJECT', '$T'); db.export_markdown_roadmap('$PROJECT', Path('$PROJECT_ROOT/docs/ROADMAP.md'))"
+    COCKPIT_HOME="$COCKPIT_HOME" PROJECT="$PROJECT" T="$T" PROJECT_ROOT="$PROJECT_ROOT" python3 - << 'PY'
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.environ["COCKPIT_HOME"], "core"))
+from pmo_db import CockpitDB
+
+db = CockpitDB(Path(os.environ["COCKPIT_HOME"]) / "db" / "cockpit_pmo.db")
+db.complete_and_merge_ticket(os.environ["PROJECT"], os.environ["T"])
+db.export_markdown_roadmap(os.environ["PROJECT"], Path(os.environ["PROJECT_ROOT"]) / "docs" / "ROADMAP.md")
+PY
     echo "OK land : $T nettoyé et dépendants débloqués dans SQLite."
     ;;
   *)

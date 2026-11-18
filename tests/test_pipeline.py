@@ -253,6 +253,51 @@ class PipelineTests(unittest.TestCase):
         events = [(e["kind"], e["detail"]) for e in self.db.recent_events("demo", 20)]
         self.assertIn(("AUTO_STOP", "max_tickets"), events)
 
+    def test_require_tests_refuses_then_accepts_second_attempt(self) -> None:
+        self.runner_cfg["defaults"]["require_tests"] = True
+        self.db.upsert_ticket("demo", "T-040", "Porte 1 statique", milestone_id="M1", complexity="S",
+                              files_owned=["core.py", "tests/test_core.py"])
+        # 1re tentative : source seule, refusée par la Porte 1 statique. 2e : test ajouté.
+        self.worker(
+            'if echo "$1" | grep -q "Aucun test"; then\n'
+            "mkdir -p tests\n"
+            "cat > tests/test_core.py << EOF\n"
+            "import unittest\n\nclass C(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n"
+            "EOF\n"
+            "fi\n"
+            "echo 'X = 1' > core.py"
+        )
+        self.assertEqual(pipeline.run_ticket(self.db, "demo", "T-040", use_gate1=False), 0)
+        t = self.db.get_ticket("demo", "T-040")
+        self.assertEqual(t["fail_count"], 1)
+        self.assertEqual(t["state"], "GATE2")
+        self.assertIn("GATE1_STATIC_FAIL", [e["kind"] for e in self.db.recent_events("demo", 20)])
+        with self.db._connect() as conn:
+            run_row = conn.execute(
+                "SELECT gate1 FROM runs WHERE project_id = 'demo' AND ticket_id = 'T-040' AND attempt = 1"
+            ).fetchone()
+        self.assertEqual(run_row["gate1"], "STATIC_FAIL")
+
+    def test_require_tests_accepts_docs_only_ticket(self) -> None:
+        self.runner_cfg["defaults"]["require_tests"] = True
+        self.db.upsert_ticket("demo", "T-041", "Documentation seule", milestone_id="M1", complexity="S",
+                              files_owned=["docs/README.md"])
+        self.worker("mkdir -p docs; echo '# doc' > docs/README.md")
+        self.assertEqual(pipeline.run_ticket(self.db, "demo", "T-041", use_gate1=False), 0)
+        t = self.db.get_ticket("demo", "T-041")
+        self.assertEqual((t["state"], t["fail_count"]), ("GATE2", 0))
+        self.assertNotIn("GATE1_STATIC_FAIL", [e["kind"] for e in self.db.recent_events("demo", 20)])
+
+    def test_require_tests_disabled_has_no_effect(self) -> None:
+        self.runner_cfg["defaults"]["require_tests"] = False
+        self.db.upsert_ticket("demo", "T-042", "Option désactivée", milestone_id="M1", complexity="S",
+                              files_owned=["core.py"])
+        self.worker("echo 'X = 1' > core.py")
+        self.assertEqual(pipeline.run_ticket(self.db, "demo", "T-042", use_gate1=False), 0)
+        t = self.db.get_ticket("demo", "T-042")
+        self.assertEqual((t["state"], t["fail_count"]), ("GATE2", 0))
+        self.assertNotIn("GATE1_STATIC_FAIL", [e["kind"] for e in self.db.recent_events("demo", 20)])
+
     def test_auto_stops_after_max_escalations(self) -> None:
         self.db.upsert_ticket("demo", "T-015", "Échec 1", milestone_id="M1", complexity="S", files_owned=["a.py"])
         self.db.upsert_ticket("demo", "T-016", "Échec 2", milestone_id="M1", complexity="S", files_owned=["b.py"])
@@ -266,6 +311,205 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.db.get_ticket("demo", "T-017")["state"], "READY")
         events = [(e["kind"], e["detail"]) for e in self.db.recent_events("demo", 20)]
         self.assertIn(("AUTO_STOP", "escalades"), events)
+
+    def test_auto_max_tickets_bounds_slots(self) -> None:
+        """(a) max_tickets=1 avec slots=2 ne lance qu'un seul ticket."""
+        self.db.set_mistral_key_active(True)
+        self.db.upsert_ticket("demo", "T-020", "Ticket 1", milestone_id="M1", complexity="S", files_owned=["a.py"])
+        self.db.upsert_ticket("demo", "T-021", "Ticket 2", milestone_id="M1", complexity="S", files_owned=["b.py"])
+        called: list[str] = []
+
+        def fake_run(db: pmo_db.CockpitDB, project_id: str, ticket_id: str, **_: object) -> int:
+            called.append(ticket_id)
+            db.update_ticket(project_id, ticket_id, state="GATE2")
+            return 0
+
+        orig_run = pipeline.run_ticket
+        try:
+            pipeline.run_ticket = fake_run  # type: ignore[assignment]
+            code = pipeline.main(["auto", "demo", "--slots", "2", "--max-tickets", "1"])
+        finally:
+            pipeline.run_ticket = orig_run  # type: ignore[assignment]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(called, ["T-020"])
+        self.assertEqual(self.db.get_ticket("demo", "T-020")["state"], "GATE2")
+        self.assertEqual(self.db.get_ticket("demo", "T-021")["state"], "READY")
+
+    def test_auto_batch_failure_then_success_keeps_escalation_count(self) -> None:
+        """(b) un lot [échec, succès] n'efface pas le compteur d'escalades et l'arrêt « escalades » survient quand le seuil est atteint."""
+        self.db.set_mistral_key_active(True)
+        # Lot 1 : T-022 (échec) et T-023 (succès) -> 1 escalade
+        # Lot 2 : T-024 (échec) et T-025 (succès) -> 2 escalades -> arrêt "escalades" avant T-026
+        self.db.upsert_ticket("demo", "T-022", "Échec lot 1", milestone_id="M1", priority="P0", complexity="S", files_owned=["a.py"])
+        self.db.upsert_ticket("demo", "T-023", "Succès lot 1", milestone_id="M1", priority="P1", complexity="S", files_owned=["b.py"])
+        self.db.upsert_ticket("demo", "T-024", "Échec lot 2", milestone_id="M1", priority="P2", complexity="S", files_owned=["c.py"])
+        self.db.upsert_ticket("demo", "T-025", "Succès lot 2", milestone_id="M1", priority="P2", complexity="S", files_owned=["d.py"])
+        self.db.upsert_ticket("demo", "T-026", "Non lancé", milestone_id="M1", priority="P3", complexity="S", files_owned=["e.py"])
+
+        outcomes = {"T-022": 1, "T-023": 0, "T-024": 1, "T-025": 0, "T-026": 0}
+
+        def fake_run(db: pmo_db.CockpitDB, project_id: str, ticket_id: str, **_: object) -> int:
+            db.update_ticket(project_id, ticket_id, state="GATE2")
+            return outcomes[ticket_id]
+
+        orig_run = pipeline.run_ticket
+        try:
+            pipeline.run_ticket = fake_run  # type: ignore[assignment]
+            code = pipeline.main([
+                "auto", "demo", "--slots", "2", "--max-tickets", "6", "--max-escalations", "2"
+            ])
+        finally:
+            pipeline.run_ticket = orig_run  # type: ignore[assignment]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.db.get_ticket("demo", "T-026")["state"], "READY")
+        events = [(e["kind"], e["detail"]) for e in self.db.recent_events("demo", 20)]
+        self.assertIn(("AUTO_STOP", "escalades"), events)
+
+    def test_auto_worker_exception_resets_ticket_to_ready_keeps_locks_and_lets_sibling_finish(self) -> None:
+        """(c) une exception dans un worker remet son ticket à READY, conserve ses verrous et n'empêche pas l'autre ticket du lot d'aboutir."""
+        self.db.set_mistral_key_active(True)
+        self.db.upsert_ticket("demo", "T-027", "Crash worker", milestone_id="M1", priority="P0", complexity="S", files_owned=["crash.py"])
+        self.db.upsert_ticket("demo", "T-028", "Succès voisin", milestone_id="M1", priority="P1", complexity="S", files_owned=["ok.py"])
+
+        def fake_run(db: pmo_db.CockpitDB, project_id: str, ticket_id: str, **_: object) -> int:
+            ticket = db.get_ticket(project_id, ticket_id)
+            assert ticket is not None
+            files = ["crash.py"] if ticket_id == "T-027" else ["ok.py"]
+            db.acquire_locks(project_id, ticket_id, files)
+            db.update_ticket(project_id, ticket_id, state="ASSIGNED")
+            if ticket_id == "T-027":
+                raise RuntimeError("panne inattendue dans le thread")
+            db.update_ticket(project_id, ticket_id, state="GATE2")
+            return 0
+
+        orig_run = pipeline.run_ticket
+        try:
+            pipeline.run_ticket = fake_run  # type: ignore[assignment]
+            code = pipeline.main([
+                "auto", "demo", "--slots", "2", "--max-tickets", "2", "--max-escalations", "1"
+            ])
+        finally:
+            pipeline.run_ticket = orig_run  # type: ignore[assignment]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.db.get_ticket("demo", "T-027")["state"], "READY")
+        self.assertEqual(self.db.get_ticket("demo", "T-028")["state"], "GATE2")
+        # Les verrous de T-027 sont conservés
+        ok_steal, conflicts = self.db.acquire_locks("demo", "T-OTHER", ["crash.py"])
+        self.assertFalse(ok_steal)
+        self.assertTrue(any("T-027" in c for c in conflicts))
+        events = [(e["ticket_id"], e["kind"]) for e in self.db.recent_events("demo", 20)]
+        self.assertIn(("T-027", "WORKER_CRASH"), events)
+
+    def test_gate2_ticket_retains_locks_after_cmd_auto(self) -> None:
+        """(f) un ticket en GATE2 conserve ses verrous après cmd_auto."""
+        self.db.upsert_ticket("demo", "T-029", "Ticket GATE2", milestone_id="M1", complexity="S", files_owned=["locked.py"])
+        self.worker("echo 'X = 1' > locked.py")
+
+        code = pipeline.main(["auto", "demo", "--slots", "1", "--max-tickets", "1"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.db.get_ticket("demo", "T-029")["state"], "GATE2")
+        ok, conflicts = self.db.acquire_locks("demo", "T-030", ["locked.py"])
+        self.assertFalse(ok)
+        self.assertTrue(any("T-029" in c for c in conflicts))
+
+    def test_recent_runs_by_lane_counts_only_recent_provider_runs(self) -> None:
+        """Compte les runs récents par voie pour un provider, sans les runs hors fenêtre ni les autres providers."""
+        self.db.record_run("demo", "T-058", attempt=1, lane="agy_standard", provider="agy")
+        self.db.record_run("demo", "T-059", attempt=1, lane="agy_standard", provider="agy")
+        self.db.record_run("demo", "T-060", attempt=1, lane="agy_argon", provider="agy")
+        self.db.record_run("demo", "T-061", attempt=1, lane="agy_standard", provider="deepseek")
+        with self.db._connect() as conn:
+            conn.execute("UPDATE runs SET created_at = datetime('now', '-6 hours') WHERE ticket_id = 'T-060'")
+        self.assertEqual(self.db.recent_runs_by_lane("agy"), {"agy_standard": 2})
+        self.assertEqual(self.db.recent_runs_by_lane("agy", hours=7.0), {"agy_standard": 2, "agy_argon": 1})
+
+    def test_estimate_window_accumulates_recent_runs(self) -> None:
+        """(a) deux runs sur agy_standard (6 % chacun) donnent 12 % de fenêtre utilisée."""
+        self.runner_cfg["runners"]["agy_standard"].update(
+            provider="agy", cost_source="estimate", window_pct_per_run=6.0
+        )
+        self.db.upsert_ticket("demo", "T-050", "Estimation 1", milestone_id="M1", complexity="S", files_owned=["a.py"])
+        self.db.upsert_ticket("demo", "T-051", "Estimation 2", milestone_id="M1", complexity="S", files_owned=["b.py"])
+        self.worker("echo 'X = 1' > a.py")
+        self.assertEqual(
+            pipeline.run_ticket(self.db, "demo", "T-050", lane_override="agy_standard", use_gate1=False), 0
+        )
+        self.worker("echo 'Y = 1' > b.py")
+        self.assertEqual(
+            pipeline.run_ticket(self.db, "demo", "T-051", lane_override="agy_standard", use_gate1=False), 0
+        )
+        with self.db._connect() as conn:
+            pct = conn.execute(
+                "SELECT window_used_pct FROM quota_state WHERE provider = 'agy'"
+            ).fetchone()["window_used_pct"]
+        self.assertAlmostEqual(pct, 12.0)
+
+    def test_estimate_ignores_runs_older_than_window(self) -> None:
+        """(b) un run daté de plus de 5 h n'est pas compté dans la fenêtre glissante."""
+        self.runner_cfg["runners"]["agy_standard"].update(
+            provider="agy", cost_source="estimate", window_pct_per_run=6.0
+        )
+        self.db.upsert_ticket("demo", "T-052", "Ancien run", milestone_id="M1", complexity="S", files_owned=["a.py"])
+        self.db.upsert_ticket("demo", "T-053", "Run récent", milestone_id="M1", complexity="S", files_owned=["b.py"])
+        self.worker("echo 'X = 1' > a.py")
+        self.assertEqual(
+            pipeline.run_ticket(self.db, "demo", "T-052", lane_override="agy_standard", use_gate1=False), 0
+        )
+        with self.db._connect() as conn:
+            conn.execute("UPDATE runs SET created_at = datetime('now', '-6 hours') WHERE ticket_id = 'T-052'")
+        self.worker("echo 'Y = 1' > b.py")
+        self.assertEqual(
+            pipeline.run_ticket(self.db, "demo", "T-053", lane_override="agy_standard", use_gate1=False), 0
+        )
+        with self.db._connect() as conn:
+            pct = conn.execute(
+                "SELECT window_used_pct FROM quota_state WHERE provider = 'agy'"
+            ).fetchone()["window_used_pct"]
+        self.assertAlmostEqual(pct, 6.0)
+
+    def test_lane_without_cost_source_leaves_quota_and_run_unchanged(self) -> None:
+        """(c) une voie sans cost_source ne touche ni quota_state ni les champs de coût du run."""
+        runner = self.runner_cfg["runners"]["deepseek_coder"]
+        runner["provider"] = "deepseek"
+        runner.pop("cost_source", None)
+        self.db.upsert_ticket("demo", "T-054", "Sans estimation", milestone_id="M1", complexity="S", files_owned=["a.py"])
+        with self.db._connect() as conn:
+            before = dict(conn.execute("SELECT * FROM quota_state WHERE provider = 'deepseek'").fetchone())
+        self.worker("echo 'X = 1' > a.py")
+        self.assertEqual(
+            pipeline.run_ticket(self.db, "demo", "T-054", lane_override="deepseek_coder", use_gate1=False), 0
+        )
+        with self.db._connect() as conn:
+            after = dict(conn.execute("SELECT * FROM quota_state WHERE provider = 'deepseek'").fetchone())
+            run_row = conn.execute(
+                "SELECT tokens_in, tokens_out, cost_eur FROM runs WHERE ticket_id = 'T-054'"
+            ).fetchone()
+        self.assertEqual(before, after)
+        self.assertEqual((run_row["tokens_in"], run_row["tokens_out"], run_row["cost_eur"]), (0, 0, 0.0))
+
+    def test_estimate_window_is_capped_at_100(self) -> None:
+        """(d) la jauge de fenêtre glissante est plafonnée à 100.0."""
+        self.runner_cfg["runners"]["agy_standard"].update(
+            provider="agy", cost_source="estimate", window_pct_per_run=60.0
+        )
+        self.db.upsert_ticket("demo", "T-056", "Plafond 1", milestone_id="M1", complexity="S", files_owned=["a.py"])
+        self.db.upsert_ticket("demo", "T-057", "Plafond 2", milestone_id="M1", complexity="S", files_owned=["b.py"])
+        self.worker("echo 'X = 1' > a.py")
+        self.assertEqual(
+            pipeline.run_ticket(self.db, "demo", "T-056", lane_override="agy_standard", use_gate1=False), 0
+        )
+        self.worker("echo 'Y = 1' > b.py")
+        self.assertEqual(
+            pipeline.run_ticket(self.db, "demo", "T-057", lane_override="agy_standard", use_gate1=False), 0
+        )
+        with self.db._connect() as conn:
+            pct = conn.execute(
+                "SELECT window_used_pct FROM quota_state WHERE provider = 'agy'"
+            ).fetchone()["window_used_pct"]
+        self.assertAlmostEqual(pct, 100.0)
 
 
 if __name__ == "__main__":

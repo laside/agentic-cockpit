@@ -75,7 +75,17 @@ def compile_ticket_brief(
 
     if readonly_files:
         sections.append("\n<!-- BLOC 2 : CONTRATS D'INTERFACES (AST LECTURE SEULE) -->")
+        root_resolved = project_root.resolve()
         for rel in readonly_files:
+            rel_path = Path(rel)
+            if (
+                rel_path.is_absolute()
+                or ".." in rel_path.parts
+                or ".." in rel.replace("\\", "/").split("/")
+                or not (project_root / rel_path).resolve().is_relative_to(root_resolved)
+            ):
+                sections.append(f"## `{rel}` — fichier ignoré : hors du dépôt")
+                continue
             fp = project_root / rel
             if fp.exists() and fp.suffix == ".py":
                 skel = extract_python_ast_skeleton(fp.read_text(encoding="utf-8", errors="replace"))

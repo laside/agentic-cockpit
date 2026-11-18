@@ -33,16 +33,25 @@ case "$CMD" in
   secret)
     KEY="${1:-}"
     [ -n "$KEY" ] || { echo "Usage: cockpit secret MISTRAL_API_KEY" >&2; exit 1; }
+    [[ "$KEY" =~ ^[A-Z][A-Z0-9_]*$ ]] || { echo "Clé secrète invalide : $KEY (attendu: ^[A-Z][A-Z0-9_]*$)" >&2; exit 1; }
     ENV_FILE="$COCKPIT_HOME/.env.cockpit"
     touch "$ENV_FILE" && chmod 600 "$ENV_FILE"
     read -r -s -p "Valeur secrète pour $KEY : " VAL
     echo ""
     grep -v "^${KEY}=" "$ENV_FILE" > "${ENV_FILE}.tmp" || true
-    printf '%s="%s"\n' "$KEY" "$VAL" >> "${ENV_FILE}.tmp"
+    printf '%s=%q\n' "$KEY" "$VAL" >> "${ENV_FILE}.tmp"
     mv "${ENV_FILE}.tmp" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
     if [ "$KEY" = "MISTRAL_API_KEY" ]; then
-      python3 -c "import sys; sys.path.insert(0, '$COCKPIT_HOME/core'); from pmo_db import CockpitDB; from pathlib import Path; CockpitDB(Path('$DB_PATH')).set_mistral_key_active(True)"
+      COCKPIT_HOME="$COCKPIT_HOME" DB_PATH="$DB_PATH" python3 - << 'PY'
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.environ["COCKPIT_HOME"], "core"))
+from pmo_db import CockpitDB
+
+CockpitDB(Path(os.environ["DB_PATH"])).set_mistral_key_active(True)
+PY
       echo "OK : Clé MISTRAL_API_KEY enregistrée et voie Mistral 25€/mois ACTIVÉE dans le Gouverneur."
     else
       echo "OK : Secret $KEY mis à jour dans $ENV_FILE (0600)."
