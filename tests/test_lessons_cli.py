@@ -22,7 +22,7 @@ from pmo_db import CockpitDB  # noqa: E402
 
 SECTION_BEGIN = "<!-- BEGIN COCKPIT LESSONS -->"
 SECTION_END = "<!-- END COCKPIT LESSONS -->"
-MOTIF_RECURRENT = "Gate0: échec de compilation du module paiement"
+MOTIF_RECURRENT = "Il manque un test d'acceptation du contrat"
 
 
 class TestRoutageLessonsDansLeLanceur(unittest.TestCase):

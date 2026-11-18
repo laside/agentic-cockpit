@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,40 @@ MIN_OCCURRENCES = 3
 MAX_RULES = 20
 SECTION_BEGIN = "<!-- BEGIN COCKPIT LESSONS -->"
 SECTION_END = "<!-- END COCKPIT LESSONS -->"
+
+CATEGORIES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "test_contrat",
+        "rule": "Écris un test d'acceptation couvrant un comportement du contrat.",
+        "keywords": ("test", "couverture", "acceptation", "contrat"),
+    },
+    {
+        "id": "perimetre_files_owned",
+        "rule": "Ne modifie que FILES_OWNED ; annule le reste.",
+        "keywords": ("files_owned", "hors perimetre", "perimetre", "non autorise"),
+    },
+    {
+        "id": "aucun_fichier_modifie",
+        "rule": "Crée ou modifie au moins un fichier de FILES_OWNED ; pas de diff vide.",
+        "keywords": ("aucun fichier", "aucune modification", "diff vide", "pas ete cree"),
+    },
+    {
+        "id": "donnee_privee",
+        "rule": "Données factices (example.com, 192.0.2.x) uniquement ; aucun secret.",
+        "keywords": ("e-mail", "email", "adresse ip", "ip privee", "donnee privee", "secret", "privacy"),
+    },
+    {
+        "id": "porte_integration",
+        "rule": "Ramène la branche principale, résous les conflits, rejoue lint/tests.",
+        "keywords": ("integration", "conflit", "merge", "fusion"),
+    },
+)
+
+_CATEGORIES_PAR_ID = {categorie["id"]: categorie for categorie in CATEGORIES}
+_REPLI_KINDS = {
+    "PR_PRIVACY_FAIL": _CATEGORIES_PAR_ID["donnee_privee"],
+    "INTEGRATION_FAIL": _CATEGORIES_PAR_ID["porte_integration"],
+}
 
 _EMAIL_RE = re.compile(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+", re.IGNORECASE)
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -135,19 +170,86 @@ def _private_hits(text: str) -> list[str]:
     return private_text_hits(text)
 
 
-def propose_rules(groupes: list[dict[str, Any]]) -> list[str]:
-    """Propose des règles courtes, déterministes et dédupliquées (au plus MAX_RULES)."""
+def _replier(texte: Any) -> str:
+    """Minuscule et accents repliés pour une recherche par sous-chaîne."""
+    decompose = unicodedata.normalize("NFKD", str(texte or ""))
+    sans_accents = "".join(c for c in decompose if not unicodedata.combining(c))
+    return sans_accents.lower()
+
+
+def _classifier_echec(echec: dict[str, Any]) -> dict[str, Any] | None:
+    """Retourne la première catégorie correspondant au détail, sinon le repli par kind."""
+    texte = _replier(echec.get("detail", ""))
+    for categorie in CATEGORIES:
+        if any(mot in texte for mot in categorie["keywords"]):
+            return categorie
+    return _REPLI_KINDS.get(str(echec.get("kind", "") or ""))
+
+
+def classify_failures(
+    failures: list[dict[str, Any]],
+    min_occurrences: int = MIN_OCCURRENCES,
+) -> list[dict[str, Any]]:
+    """Classe les échecs en catégories pré-rédigées, triées (-count, category)."""
+    groupes: dict[str, dict[str, Any]] = {}
+    ordre: list[str] = []
+    for echec in failures:
+        categorie = _classifier_echec(echec)
+        if categorie is None:
+            continue
+        identifiant = str(categorie["id"])
+        groupe = groupes.get(identifiant)
+        if groupe is None:
+            groupe = {
+                "category": identifiant,
+                "rule": categorie["rule"],
+                "count": 0,
+                "kinds": set(),
+                "examples": [],
+            }
+            groupes[identifiant] = groupe
+            ordre.append(identifiant)
+        groupe["count"] += 1
+        kind = str(echec.get("kind", "") or "")
+        if kind:
+            groupe["kinds"].add(kind)
+        detail = str(echec.get("detail", "") or "")
+        if detail and detail not in groupe["examples"] and len(groupe["examples"]) < 2:
+            groupe["examples"].append(detail)
+    resultat: list[dict[str, Any]] = []
+    for identifiant in ordre:
+        groupe = groupes[identifiant]
+        if groupe["count"] < min_occurrences:
+            continue
+        resultat.append(
+            {
+                "category": identifiant,
+                "rule": groupe["rule"],
+                "count": groupe["count"],
+                "kinds": sorted(groupe["kinds"]),
+                "examples": list(groupe["examples"]),
+            }
+        )
+    resultat.sort(key=lambda g: (-g["count"], g["category"]))
+    return resultat
+
+
+def _regle_de(categorie: Any) -> str:
+    """Extrait la règle pré-rédigée d'une catégorie retenue."""
+    if isinstance(categorie, dict):
+        return str(categorie.get("rule", "") or "")
+    return str(categorie or "")
+
+
+def propose_rules(categories: list[dict[str, Any]]) -> list[str]:
+    """Règles pré-rédigées dédupliquées, filtrées et plafonnées (au plus MAX_RULES)."""
     regles: list[str] = []
     vues: set[str] = set()
-    for groupe in groupes:
-        motif = str(groupe.get("motif", "") or "").strip()
-        if not motif or _private_hits(motif):
+    for categorie in categories:
+        regle = " ".join(_regle_de(categorie).split()).strip()
+        if not regle or _private_hits(regle):
             continue
-        count = int(groupe.get("count", 0) or 0)
-        kinds = ", ".join(str(k) for k in (groupe.get("kinds") or []))
-        suffixe = f", {kinds}" if kinds else ""
-        regle = f"Prévenir la récurrence « {motif} » ({count} occurrences{suffixe})"
-        cle = " ".join(regle.split()).lower()
+        cle = regle.lower()
         if cle in vues:
             continue
         vues.add(cle)
@@ -248,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     failures = collect_failures(args.db or _db_par_defaut(), args.project)
-    groupes = group_recurring(failures, min_occurrences=args.min_occurrences)
+    groupes = classify_failures(failures, min_occurrences=args.min_occurrences)
     regles = propose_rules(groupes)
 
     if args.json:

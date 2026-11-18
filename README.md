@@ -114,8 +114,12 @@ Toutes les commandes passent par le lanceur unique `bin/cockpit` :
 ### Leçons apprises (`cockpit lessons`)
 
 `cockpit lessons <projet> [--apply] [--db chemin] [--rules chemin] [--min N]` analyse les événements
-`GATE0_FAIL`, `GATE1_FAIL`, `INTEGRATION_FAIL` et `PR_PRIVACY_FAIL` de la base (`--db`), regroupe les
-motifs revenant au moins 3 fois (seuil réglable par `--min N`) et propose des règles courtes. Sans
+`GATE0_FAIL`, `GATE1_FAIL`, `INTEGRATION_FAIL` et `PR_PRIVACY_FAIL` de la base (`--db`) et classe les
+échecs dans 5 catégories pré-rédigées : `test_contrat`, `perimetre_files_owned`,
+`aucun_fichier_modifie`, `donnee_privee` et `porte_integration`. La classification se fait par mot-clé
+(recherche insensible à la casse et aux accents) ; les échecs sans mot-clé et de kind non mappé sont
+ignorés. Les catégories revenant au moins 3 fois (seuil réglable par `--min N`) proposent leur règle
+pré-rédigée, sans interpolation du motif ni du détail. Sans
 `--apply`, la commande se contente d'afficher les propositions : elle n'écrit rien. `--apply` insère
 les règles de façon idempotente dans la section bornée à 20 règles maximum, sans doublon, du fichier
 cible (`templates/core.md` par défaut, ou `--rules chemin`), délimitée exactement par les marqueurs
