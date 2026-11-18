@@ -129,6 +129,25 @@ def plan_batch(
     return batch
 
 
+def count_failures(
+    db: CockpitDB,
+    project_id: str,
+    batch: list[dict[str, Any]],
+    results: dict[str, int],
+) -> int:
+    """Compte les échecs d'un lot `auto`, sans compter les tickets déjà en PR_OPEN."""
+    failures = 0
+    for item in batch:
+        ticket_id = item["id"]
+        if results.get(ticket_id, 1) == 0:
+            continue
+        ticket = db.get_ticket(project_id, ticket_id)
+        if ticket and ticket.get("state") == "PR_OPEN":
+            continue
+        failures += 1
+    return failures
+
+
 def should_stop(
     done: int,
     escalations_in_a_row: int,

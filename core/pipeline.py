@@ -871,6 +871,26 @@ def abandon_ticket(db: CockpitDB, project_id: str, ticket_id: str, reason: str =
     return abandoned
 
 
+def _pr_only_body(
+    db: CockpitDB, project_id: str, ticket_id: str, contract: str, wt: Path, base_ref: str
+) -> str:
+    """Corps de PR généré sans LLM : contrat, fichiers, diffstat, portes et coût du dernier run."""
+    modified = changed_files(wt, base_ref)
+    diffstat = sh(["git", "diff", "--stat", f"{base_ref}..HEAD"], wt, check=False).stdout.strip()
+    run = db.last_run(project_id, ticket_id) or {}
+    gate0 = str(run.get("gate0") or "inconnu")
+    gate1 = str(run.get("gate1") or "inconnu")
+    cost_eur = float(run.get("cost_eur") or 0.0)
+    cost_usd = float(run.get("cost_usd") or 0.0)
+    return "\n\n".join([
+        contract,
+        "Fichiers modifiés :\n" + ("\n".join(f"- {f}" for f in modified) or "- (aucun)"),
+        "Diffstat :\n" + (diffstat or "(aucune modification)"),
+        f"Porte 0 : {gate0}\nPorte 1 : {gate1}",
+        f"Coût du run : {cost_eur:.4f} € ({cost_usd:.4f} $)",
+    ])
+
+
 def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool = False) -> int:
     proj = db.get_project(project_id)
     ticket = db.get_ticket(project_id, ticket_id)
@@ -908,6 +928,8 @@ def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool =
     merge_mode = str(central.get("merge_mode", "local")).strip() or "local"
     remote = str(central.get("remote", "origin")).strip() or "origin"
     github_mode = merge_mode == "github" and not parent_id
+    github_pr_mode = merge_mode == "github_pr" and not parent_id
+    github_like = github_mode or github_pr_mode
     lock_path = root / ".git" / "cockpit-merge.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = lock_path.open("a", encoding="utf-8")
@@ -931,8 +953,8 @@ def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool =
             raise PipelineError(f"{ticket_id} a des modifications non commitées dans son worktree.")
 
         # Porte d'intégration : on ramène la branche cible dans le ticket et on re-teste AVANT de fusionner.
-        integration_ref = f"{remote}/{default}" if github_mode else target_branch
-        if github_mode:
+        integration_ref = f"{remote}/{default}" if github_like else target_branch
+        if github_like:
             sh(["git", "fetch", remote], wt)
         res = sh(["git", "merge", "--no-edit", integration_ref], wt, check=False)
         if res.returncode != 0:
@@ -950,12 +972,15 @@ def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool =
                 raise PipelineError(f"Porte d'intégration refusée ({label}, `{cmd}`) :\n{sieve_test_output(out, 25)}")
         say(f"{ticket_id} : porte d'intégration OK ({integration_ref} intégré, lint et tests verts)")
 
-        if github_mode:
+        if github_like:
             gh = os.environ.get("COCKPIT_GH", "gh")
             contract = (ticket.get("contract") or "").strip()[:4000]
-            modified = changed_files(wt, integration_ref)
-            body = contract + "\n\nFichiers modifiés :\n" + "\n".join(f"- {f}" for f in modified)
             title = f"{ticket_id}: {ticket['title']}"
+            if github_pr_mode:
+                body = _pr_only_body(db, project_id, ticket_id, contract, wt, integration_ref)
+            else:
+                modified = changed_files(wt, integration_ref)
+                body = contract + "\n\nFichiers modifiés :\n" + "\n".join(f"- {f}" for f in modified)
             hits = private_text_hits(title + "\n" + body)
             if hits:
                 db.add_event(project_id, ticket_id, "PR_PRIVACY_FAIL", ", ".join(hits))
@@ -982,6 +1007,11 @@ def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool =
                     wt,
                 )
                 pr_label = created.stdout.strip().splitlines()[-1] if created.stdout.strip() else branch
+            if github_pr_mode:
+                db.update_ticket(project_id, ticket_id, state="PR_OPEN")
+                db.add_event(project_id, ticket_id, "PR_OPENED", f"{pr_label} — en attente de fusion humaine")
+                say(f"{ticket_id} : PR ouverte ({pr_label}), ticket en PR_OPEN (aucune fusion automatique).")
+                return 0
             try:
                 # Juste après le push, GitHub peut ne pas avoir encore enregistré les checks.
                 for _ in range(12):
@@ -1142,6 +1172,7 @@ def build_status(db: CockpitDB, project_id: str, max_events: int = 8) -> str:
     queue = db.get_prioritized_queue(project_id)
 
     active = [t for t in queue if t.get("state") in ACTIVE_STATES]
+    pr_open_lines = [_format_status_ticket(t) for t in queue if t.get("state") == "PR_OPEN"]
     children_by_parent: dict[str, list[dict[str, Any]]] = {}
     for t in active:
         pid = (t.get("parent_id") or "").strip()
@@ -1189,7 +1220,7 @@ def build_status(db: CockpitDB, project_id: str, max_events: int = 8) -> str:
         detail = str(e.get("detail") or "").replace("\n", " ")[:60]
         event_lines.append(f"{hhmm} {tid} {kind} {detail}".rstrip())
 
-    if not work_lines and not lock_lines and not ready_ids and not event_lines:
+    if not work_lines and not lock_lines and not ready_ids and not event_lines and not pr_open_lines:
         return "Aucune activité."
 
     def _cap(items: list[str], budget: int) -> list[str]:
@@ -1201,6 +1232,7 @@ def build_status(db: CockpitDB, project_id: str, max_events: int = 8) -> str:
         return items[:kept] + [f"... +{len(items) - kept} autres"]
 
     fixed_lines = (2 if ready_ids else 0) + ((1 + len(event_lines)) if event_lines else 0)
+    fixed_lines += (1 + len(pr_open_lines)) if pr_open_lines else 0
     rem = max(4, 40 - fixed_lines)
 
     if work_lines and lock_lines:
@@ -1219,6 +1251,9 @@ def build_status(db: CockpitDB, project_id: str, max_events: int = 8) -> str:
     if work_lines:
         out_lines.append("TRAVAUX EN COURS")
         out_lines.extend(work_lines)
+    if pr_open_lines:
+        out_lines.append("PR OUVERTES")
+        out_lines.extend(_cap(pr_open_lines, max(1, 39 - len(out_lines))))
     if lock_lines:
         out_lines.append("FICHIERS VERROUILLÉS")
         out_lines.extend(lock_lines)
@@ -1328,7 +1363,7 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
             t.join()
 
         successes = sum(1 for item in batch if results.get(item["id"], 1) == 0)
-        failures = len(batch) - successes
+        failures = scheduler.count_failures(db, projet, batch, results)
         done += successes
         if failures > 0:
             escalations_in_a_row += failures
