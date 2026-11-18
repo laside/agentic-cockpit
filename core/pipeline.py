@@ -1604,9 +1604,10 @@ def main(argv: list[str] | None = None) -> int:
     p_auto.add_argument("--parent", default="")
 
     p_ticket = sub.add_parser("ticket", help="Gestion des tickets (0 token)")
-    p_ticket.add_argument("action", choices=["add", "list", "show"])
+    p_ticket.add_argument("action", choices=["add", "list", "show", "draft", "promote"])
     p_ticket.add_argument("project")
     p_ticket.add_argument("title", nargs="?", default="")
+    p_ticket.add_argument("--lane", default="deepseek_coder", help="Voie du rédacteur pour `draft`")
     p_ticket.add_argument("--id", default="")
     p_ticket.add_argument("--milestone", default=None)
     p_ticket.add_argument("--prio", default="P2", choices=["P0", "P1", "P2", "P3"])
@@ -1712,6 +1713,26 @@ def main(argv: list[str] | None = None) -> int:
             abandon_ticket(db, args.project, args.ticket, args.reason)
             return 0
         if args.cmd == "ticket":
+            if args.action == "draft":
+                if not args.project or not args.title:
+                    raise PipelineError("Objectif manquant : cockpit ticket draft <projet> \"objectif\" [--lane L]")
+                import drafter
+                drafter.draft_ticket(db, args.project, args.title, args.lane)
+                return 0
+            if args.action == "promote":
+                first = (args.project or "").strip()
+                second = (args.title or "").strip()
+                if re.fullmatch(r"T-\d+", first):
+                    ticket_id, project = first, (second or default_project)
+                elif re.fullmatch(r"T-\d+", second):
+                    ticket_id, project = second, first
+                else:
+                    ticket_id, project = "", ""
+                if not ticket_id or not project:
+                    raise PipelineError("Usage : cockpit ticket promote T-xxx <projet>")
+                import drafter
+                drafter.promote_ticket(db, project, ticket_id)
+                return 0
             if args.action == "add" and not args.title:
                 raise PipelineError("Titre manquant : cockpit ticket add <projet> \"titre\" --files a,b")
             if args.action == "show" and not args.id:
