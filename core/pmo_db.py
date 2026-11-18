@@ -325,8 +325,8 @@ class CockpitDB:
                     raise ValueError(
                         f"Sous-ticket interdit sur {parent_id} : le parent a déjà un parent ({parent_row['parent_id']})."
                     )
-                if parent_row["state"] == "MERGED":
-                    raise ValueError(f"Le ticket parent {parent_id} est déjà MERGED.")
+                if parent_row["state"] in ("MERGED", "ABANDONED"):
+                    raise ValueError(f"Le ticket parent {parent_id} est déjà {parent_row['state']}.")
                 parent_files = {
                     normalize_rel_path(pf)
                     for pf in json.loads(parent_row["files_owned_json"] or "[]")
@@ -664,9 +664,9 @@ class CockpitDB:
             return {
                 "lane": "agy_argon",
                 "cli": "agy --model argon",
-                "tdd_prep": "nas-gemma4-32k (192.168.0.10)",
+                "tdd_prep": "nas-gemma4-32k",
                 "gate0_fixer": "local-small (RTX 3070)",
-                "gate1_audit": "nas-gemma4-32k (192.168.0.10)",
+                "gate1_audit": "nas-gemma4-32k",
                 "reason": "Escalade Argon (Ticket L/P0 ou reprise sur échec)",
             }
 
@@ -675,18 +675,18 @@ class CockpitDB:
                 return {
                     "lane": "mistral_vibe",
                     "cli": "vibe",
-                    "tdd_prep": "nas-gemma4-32k (192.168.0.10)",
+                    "tdd_prep": "nas-gemma4-32k",
                     "gate0_fixer": "local-small (RTX 3070)",
-                    "gate1_audit": "nas-gemma4-32k (192.168.0.10)",
+                    "gate1_audit": "nas-gemma4-32k",
                     "reason": "Mistral Vibe 25€ (sans fenêtre)",
                 }
             if deepseek_ready:
                 return {
                     "lane": "deepseek_coder",
                     "cli": "opencode",
-                    "tdd_prep": "nas-gemma4-32k (192.168.0.10)",
+                    "tdd_prep": "nas-gemma4-32k",
                     "gate0_fixer": "local-small (RTX 3070)",
-                    "gate1_audit": "nas-gemma4-32k (192.168.0.10)",
+                    "gate1_audit": "nas-gemma4-32k",
                     "reason": "Mistral en veille -> Repli DeepSeek 20€",
                 }
 
@@ -695,18 +695,18 @@ class CockpitDB:
                 return {
                     "lane": "mistral_vibe",
                     "cli": "vibe",
-                    "tdd_prep": "nas-gemma4-32k (192.168.0.10)",
+                    "tdd_prep": "nas-gemma4-32k",
                     "gate0_fixer": "local-small (RTX 3070)",
-                    "gate1_audit": "nas-gemma4-32k (192.168.0.10)",
+                    "gate1_audit": "nas-gemma4-32k",
                     "reason": "Lissage budget -> Mistral Vibe 25€",
                 }
             if deepseek_ready:
                 return {
                     "lane": "deepseek_coder",
                     "cli": "opencode",
-                    "tdd_prep": "nas-gemma4-32k (192.168.0.10)",
+                    "tdd_prep": "nas-gemma4-32k",
                     "gate0_fixer": "local-small (RTX 3070)",
-                    "gate1_audit": "nas-gemma4-32k (192.168.0.10)",
+                    "gate1_audit": "nas-gemma4-32k",
                     "reason": "Bouclier quota AGY -> DeepSeek 20€",
                 }
 
@@ -715,36 +715,36 @@ class CockpitDB:
                 return {
                     "lane": "agy_standard",
                     "cli": "agy",
-                    "tdd_prep": "nas-gemma4-32k (192.168.0.10)",
+                    "tdd_prep": "nas-gemma4-32k",
                     "gate0_fixer": "local-small (RTX 3070)",
-                    "gate1_audit": "nas-gemma4-32k (192.168.0.10)",
+                    "gate1_audit": "nas-gemma4-32k",
                     "reason": f"Antigravity Pro nominal (quota 5h à {agy['window_used_pct']:.0f}%)",
                 }
             if mistral_ready:
                 return {
                     "lane": "mistral_vibe",
                     "cli": "vibe",
-                    "tdd_prep": "nas-gemma4-32k (192.168.0.10)",
+                    "tdd_prep": "nas-gemma4-32k",
                     "gate0_fixer": "local-small (RTX 3070)",
-                    "gate1_audit": "nas-gemma4-32k (192.168.0.10)",
+                    "gate1_audit": "nas-gemma4-32k",
                     "reason": f"Bouclier AGY ({agy['window_used_pct']:.0f}% >= 60%) -> Mistral 25€",
                 }
             if deepseek_ready:
                 return {
                     "lane": "deepseek_coder",
                     "cli": "opencode",
-                    "tdd_prep": "nas-gemma4-32k (192.168.0.10)",
+                    "tdd_prep": "nas-gemma4-32k",
                     "gate0_fixer": "local-small (RTX 3070)",
-                    "gate1_audit": "nas-gemma4-32k (192.168.0.10)",
+                    "gate1_audit": "nas-gemma4-32k",
                     "reason": f"Bouclier AGY ({agy['window_used_pct']:.0f}% >= 60%) -> DeepSeek 20€",
                 }
 
         return {
             "lane": "local_nas_coder",
             "cli": "opencode --model local-coder",
-            "tdd_prep": "nas-gemma4-32k (192.168.0.10)",
+            "tdd_prep": "nas-gemma4-32k",
             "gate0_fixer": "local-small (RTX 3070)",
-            "gate1_audit": "nas-gemma4-32k (192.168.0.10)",
+            "gate1_audit": "nas-gemma4-32k",
             "reason": "Mode autonome local GTX 1080 Ti (0 €)",
         }
 
@@ -762,14 +762,14 @@ class CockpitDB:
 
         dependents_count: dict[str, int] = {t["id"]: 0 for t in all_tickets}
         for t in all_tickets:
-            if t["state"] != "MERGED":
+            if t["state"] not in ("MERGED", "ABANDONED"):
                 for dep in json.loads(t["depends_on_json"] or "[]"):
                     if dep in dependents_count:
                         dependents_count[dep] += 1
 
         queue: list[dict[str, Any]] = []
         for t in all_tickets:
-            if t["state"] == "MERGED":
+            if t["state"] in ("MERGED", "ABANDONED"):
                 continue
             ms_bonus = 300 if t["milestone_id"] == active_ms else 0
             p_weight = prio_weights.get(t["priority"], 100)
@@ -814,7 +814,7 @@ class CockpitDB:
 
         for ms in milestones:
             m_id = ms["id"]
-            t_list = by_ms.get(m_id, [])
+            t_list = [t for t in by_ms.get(m_id, []) if t["state"] != "ABANDONED"]
             tot = len(t_list)
             merged = sum(1 for t in t_list if t["state"] == "MERGED")
             pct = round((merged / tot) * 100.0, 1) if tot else 0.0

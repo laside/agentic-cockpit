@@ -5,9 +5,17 @@ DB_PATH="$COCKPIT_HOME/db/cockpit_pmo.db"
 CMD="${1:-open}"
 shift || true
 
+usage() {
+  echo "Usage: cockpit {open|switch|new-project|secret|costs|judge-calibrate|roadmap|ticket|run|auto|claim|submit|release|status|note|abandon|dispatch|merge|events|relaunch|privacy-check|install-hooks|help}"
+}
+
 case "$CMD" in
+  help|-h|--help)
+    usage
+    exit 0
+    ;;
   open|switch)
-    PROJ="${1:-mon-app}"
+    PROJ="${1:-${PROJECT:-cockpit}}"
     export PROJECT="$PROJ"
     source "$COCKPIT_HOME/scripts/cockpit-env.sh"
     SESSION="cockpit-$PROJECT"
@@ -63,7 +71,7 @@ PY
   relaunch)
     exec bash "$COCKPIT_HOME/scripts/relaunch.sh" "$@"
     ;;
-  run|merge|ticket|events|auto|claim|submit|release|status|note)
+  run|merge|ticket|events|auto|claim|submit|release|status|note|abandon)
     exec python3 "$COCKPIT_HOME/core/pipeline.py" "$CMD" "$@"
     ;;
   costs)
@@ -73,11 +81,17 @@ PY
     exec python3 "$COCKPIT_HOME/core/judge_calibrate.py" "$@"
     ;;
   roadmap)
-    PROJ="${1:-${PROJECT:-mon-app}}"
+    PROJ="${1:-${PROJECT:-cockpit}}"
     python3 "$COCKPIT_HOME/tui/pmo_dashboard.py" --project "$PROJ" --db "$DB_PATH" --once
     ;;
+  privacy-check)
+    exec python3 "$COCKPIT_HOME/scripts/privacy-check.py" "$@"
+    ;;
+  install-hooks)
+    exec bash "$COCKPIT_HOME/scripts/install-hooks.sh" "$@"
+    ;;
   *)
-    echo "Usage: cockpit {open|switch|new-project|secret|costs|judge-calibrate|roadmap|ticket|run|auto|claim|submit|release|status|note|dispatch|merge|events|relaunch}" >&2
+    usage >&2
     exit 1
     ;;
 esac

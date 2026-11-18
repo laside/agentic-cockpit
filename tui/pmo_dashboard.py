@@ -77,8 +77,7 @@ def render_pmo_screen(db: CockpitDB, project_id: str, width: int = 105) -> str:
         f"(Cible {ds.get('daily_target_eur', 0.65):.2f}€/j) │ Mistral 25€ : {C_YELLOW}{ms_status}{C_RESET}"
     )
     lines.append(
-        f"{C_DIM}GPU Locaux (0€) :{C_RESET} NAS 1080Ti (192.168.0.10) {C_GREEN}Gemma4-ctx:32k (208 tok/s){C_RESET} │ "
-        f"PC RTX 3070 {C_GREEN}Qwen2.5-Coder:7b (Fixer){C_RESET}"
+        f"{C_DIM}GPU locaux (0 €) :{C_RESET} Ollama"
     )
     lines.append("")
 
@@ -89,7 +88,7 @@ def render_pmo_screen(db: CockpitDB, project_id: str, width: int = 105) -> str:
 
     for ms_row in milestones:
         m_id = ms_row["id"]
-        t_list = by_ms.get(m_id, [])
+        t_list = [t for t in by_ms.get(m_id, []) if t["state"] != "ABANDONED"]
         tot = len(t_list)
         merged = sum(1 for t in t_list if t["state"] == "MERGED")
         pct = (merged / tot * 100.0) if tot else 0.0
@@ -133,7 +132,7 @@ def render_pmo_screen(db: CockpitDB, project_id: str, width: int = 105) -> str:
         owner = (item.get("owner") or "").strip()
         suffix = (
             f" (tenu par {owner})"
-            if owner and item["state"] not in ("READY", "BLOCKED", "MERGED")
+            if owner and item["state"] not in ("READY", "BLOCKED", "MERGED", "ABANDONED")
             else ""
         )
         title_trunc = item["title"][: max(20, width - 78 - len(suffix))]
@@ -171,7 +170,7 @@ def render_pmo_screen(db: CockpitDB, project_id: str, width: int = 105) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--project", default=os.environ.get("PROJECT", "mon-app"))
+    parser.add_argument("--project", default=os.environ.get("PROJECT", "cockpit"))
     parser.add_argument("--db", default=str(Path.home() / "agentic-cockpit/db/cockpit_pmo.db"))
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()

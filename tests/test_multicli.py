@@ -301,7 +301,7 @@ class MultiCliTests(unittest.TestCase):
 
     def test_cmd_auto_uses_max_parallel_and_runners_toml_defines_it(self) -> None:
         """cmd_auto construit lane_providers et provider_limits depuis max_parallel ; runners.toml a max_parallel=1."""
-        real_cfg = pipeline.load_toml(COCKPIT_ROOT / "config" / "runners.toml")
+        real_cfg = pipeline.load_toml(COCKPIT_ROOT / "config" / "runners.example.toml")
         self.assertEqual(real_cfg["runners"]["agy_standard"].get("max_parallel"), 1)
         self.assertEqual(real_cfg["runners"]["agy_argon"].get("max_parallel"), 1)
 

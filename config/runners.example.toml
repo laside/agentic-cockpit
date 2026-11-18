@@ -1,13 +1,15 @@
 # Agentic Cockpit V2 — Runners headless : une entrée par voie du Gouverneur de Quotas.
+# Copiez ce fichier vers ~/.config/agentic-cockpit/runners.toml (ou $COCKPIT_CONFIG_DIR/runners.toml)
+# pour personnaliser vos runners hors dépôt.
 # Pour ajouter un LLM ou un CLI : copier un bloc, changer `argv`, et faire pointer une voie dessus.
 # `{prompt}` est remplacé par la consigne du pipeline. La commande s'exécute dans le worktree du ticket.
 # `agent` = panneau/identité affichée (deepseek, agy, mistral, local) ; `provider` = ligne de quota_state.
 
 [defaults]
 timeout_s = 900          # durée maximale d'un worker
-max_attempts = 3         # tentatives avant escalade vers l'utilisateur
+max_attempts = 3         # tentatives avant escalade vers l'humain
 gate_timeout_s = 600     # durée maximale de lint + tests (Porte 0)
-gate1_timeout_s = 300    # durée maximale de l'audit NAS (Porte 1)
+gate1_timeout_s = 300    # durée maximale de l'audit local (Porte 1)
 usd_to_eur = 0.92        # taux de conversion USD -> EUR pour le suivi des coûts
 # Porte 1 statique, 0 token : un ticket qui touche du code source doit aussi toucher un test.
 require_tests = true
@@ -76,8 +78,7 @@ max_parallel = 2
 usage_format = "claude_json"
 argv = ["claude", "-p", "{prompt}", "--output-format", "json", "--model", "sonnet", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Glob,Grep,Bash(python3:*),Bash(make:*)"]
 
-# RTX 3070 (Ollama local, 0 €) : worker validé le 2026-11-18 avec qwen3:8b (80 s, Porte 0 verte).
-# qwen2.5-coder:7b est écarté : il écrit l'appel d'outil en texte JSON au lieu de l'exécuter.
+# Ollama local (0 €) : worker local avec qwen3:8b.
 # Modèle dérivé à 16k de contexte (l'endpoint /v1 d'Ollama ignore num_ctx).
 # Config opencode propre au cockpit via OPENCODE_CONFIG : ~/.config/opencode n'est jamais modifié.
 # Pour tickets XS ou tests seuls : `cockpit run T-xxx <projet> --lane local_pc` (le Gouverneur ne la choisit pas seul).
@@ -97,13 +98,13 @@ provider = "local"
 usage_format = "opencode_json"
 argv = ["opencode", "run", "--format", "json", "--model", "local-coder", "{prompt}"]
 
-# Porte 1 : audit du diff par le juge Claude Haiku en headless (ou modèle local du NAS si backend = "ollama").
+# Porte 1 : audit du diff par le juge Claude Haiku en headless (ou modèle local si backend = "ollama").
 [gate1]
-backend = "claude"               # "claude" (juge Haiku headless) ou "ollama" (audit local NAS)
+backend = "claude"               # "claude" (juge Haiku headless) ou "ollama" (audit local)
 judge_model = "haiku"            # modèle Claude utilisé par le juge de revue
 judge_timeout_s = 120            # durée maximale d'un appel au juge Claude (secondes)
 judge_max_diff_chars = 45000     # taille maximale du diff en caractères avant SKIPPED sans appel
-url = "http://192.168.0.10:11434"
+url = "http://127.0.0.1:11434"
 model = "Gemma4-ctx:32k"
-think = false            # mesuré : 2 à 4 s sans réflexion, verdicts corrects ; plusieurs minutes avec
+think = false            # 2 à 4 s sans réflexion, verdicts corrects ; plusieurs minutes avec
 max_reworks = 1          # un seul retour au worker sur avis du modèle local, ensuite l'architecte tranche

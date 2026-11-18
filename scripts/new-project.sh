@@ -8,7 +8,14 @@ PROJ_ID="${1:-}"
 [[ "$PROJ_ID" =~ ^[a-z][a-z0-9-]*$ ]] || { echo "Identifiant de projet invalide : $PROJ_ID (attendu: ^[a-z][a-z0-9-]*$)" >&2; exit 1; }
 
 COCKPIT_HOME="${COCKPIT_HOME:-$HOME/agentic-cockpit}"
-PROJECTS_TOML="${PROJECTS_TOML:-$COCKPIT_HOME/config/projects.toml}"
+COCKPIT_CONFIG_DIR="${COCKPIT_CONFIG_DIR:-$HOME/.config/agentic-cockpit}"
+if [ -z "${PROJECTS_TOML:-}" ]; then
+  mkdir -p "$COCKPIT_CONFIG_DIR"
+  PROJECTS_TOML="$COCKPIT_CONFIG_DIR/projects.toml"
+  if [ ! -f "$PROJECTS_TOML" ] && [ -f "$COCKPIT_HOME/config/projects.example.toml" ]; then
+    cp "$COCKPIT_HOME/config/projects.example.toml" "$PROJECTS_TOML"
+  fi
+fi
 PROJ_ROOT="${2:-$HOME/projets/$PROJ_ID}"
 SIDECAR_PORT="${3:-8790}"
 if ! [[ "$SIDECAR_PORT" =~ ^[0-9]+$ ]] || [ "$SIDECAR_PORT" -lt 1024 ] || [ "$SIDECAR_PORT" -gt 65535 ]; then
@@ -17,7 +24,7 @@ if ! [[ "$SIDECAR_PORT" =~ ^[0-9]+$ ]] || [ "$SIDECAR_PORT" -lt 1024 ] || [ "$SI
 fi
 WT_SESS="${PROJ_ROOT}-worktrees"
 WT_TICK="${PROJ_ROOT}-worktrees"
-MIRROR_DIR="/mnt/c/Projets/$PROJ_ID"
+MIRROR_DIR="${MIRROR_DIR:-}"
 DB_PATH="${DB_PATH:-$COCKPIT_HOME/db/cockpit_pmo.db}"
 
 COCKPIT_HOME="$COCKPIT_HOME" PROJECTS_TOML="$PROJECTS_TOML" PROJ_ID="$PROJ_ID" \
@@ -76,8 +83,10 @@ fi
 
 if [ "$HAS_GIT" -eq 1 ] && [ ! -d "$PROJ_ROOT/.git" ]; then
   git -C "$PROJ_ROOT" init -b main >/dev/null
-  git -C "$PROJ_ROOT" config user.name "${GIT_AUTHOR_NAME:-Cockpit}"
-  git -C "$PROJ_ROOT" config user.email "${GIT_AUTHOR_EMAIL:-cockpit@local}"
+  _GIT_NAME="${GIT_AUTHOR_NAME:-$(git config --global user.name 2>/dev/null || true)}"
+  _GIT_EMAIL="${GIT_AUTHOR_EMAIL:-$(git config --global user.email 2>/dev/null || true)}"
+  git -C "$PROJ_ROOT" config user.name "${_GIT_NAME:-cockpit}"
+  git -C "$PROJ_ROOT" config user.email "${_GIT_EMAIL:-cockpit@localhost}"
 else
   mkdir -p "$PROJ_ROOT/.git/info"
 fi

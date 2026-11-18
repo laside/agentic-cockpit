@@ -1,7 +1,7 @@
 # Agentic Cockpit V2 — Noyau Makefile Générique Multi-Projets (mk/agentic.mk)
 SHELL := /bin/bash
 COCKPIT_HOME ?= $(HOME)/agentic-cockpit
-PROJECT ?= mon-app
+PROJECT ?= cockpit
 
 .PHONY: cockpit roadmap worktree commit land
 

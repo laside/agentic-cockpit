@@ -80,7 +80,7 @@ def build_nas_gate1_payload(
     model: str = "Gemma4-ctx:32k",
 ) -> dict[str, Any]:
     """
-    Construit la requête Ollama pour la GTX 1080 Ti (192.168.0.10:11434) avec :
+    Construit la requête Ollama pour le GPU distant configuré dans runners.toml avec :
     - KV Cache épinglé (`keep_alive: -1`)
     - Fenêtre de 32 768 tokens validée à 208 tok/s
     - Sortie JSON stricte

@@ -20,13 +20,16 @@ from typing import Any
 
 CORE = Path(__file__).resolve().parent
 COCKPIT_HOME = Path(os.environ.get("COCKPIT_HOME", CORE.parent))
-RUNNERS_PATH = COCKPIT_HOME / "config" / "runners.toml"
-DEFAULT_CASES_DIR = COCKPIT_HOME / "tests" / "judge_cases"
 
 try:  # import packagé (core.judge_calibrate) ou exécution directe du script
+    from . import config_paths
     from . import judge as judge_mod
 except ImportError:  # pragma: no cover - dépend du mode d'import
+    import config_paths  # type: ignore[no-redef]
     import judge as judge_mod  # type: ignore[no-redef]
+
+RUNNERS_PATH = config_paths.config_file("runners.toml")
+DEFAULT_CASES_DIR = COCKPIT_HOME / "tests" / "judge_cases"
 
 PROMPT_PATH = getattr(
     judge_mod, "SYS_PROMPT_PATH", COCKPIT_HOME / "prompts" / "sys_judge_claude.md"

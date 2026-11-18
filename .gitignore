@@ -7,3 +7,6 @@ __pycache__/
 .env.*
 !.env.example
 examples/**/*.db
+config/projects.toml
+config/runners.toml
+docs/ROADMAP.md
