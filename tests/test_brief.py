@@ -31,7 +31,7 @@ class TestBrief(unittest.TestCase):
         self.repo.mkdir(parents=True)
         (self.repo / "a.py").write_text("def fa() -> int:\n    return 1\n", encoding="utf-8")
         git(self.repo, "init", "-b", "main")
-        git(self.repo, "config", "user.email", "test@cockpit.local")
+        git(self.repo, "config", "user.email", "test@cockpit.local")  # privacy-check: allow
         git(self.repo, "config", "user.name", "Test")
         git(self.repo, "add", ".")
         git(self.repo, "commit", "-m", "init")
