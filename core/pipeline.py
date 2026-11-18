@@ -1247,6 +1247,86 @@ def cmd_events(db: CockpitDB, project_id: str, limit: int) -> int:
     return 0
 
 
+def brief_project(db: CockpitDB, project_id: str) -> str:
+    """Brief de reprise du projet (<= 30 lignes, 0 token) : base + git local uniquement, sans fetch."""
+    proj = db.get_project(project_id)
+    if not proj:
+        raise PipelineError(f"Projet inconnu : {project_id}")
+    root = Path(proj["root_path"])
+    default = str(proj.get("default_branch") or "main")
+    lines: list[str] = []
+
+    branch = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], root, check=False).stdout.strip() or "?"
+    lines.append(f"PROJET {project_id} — branche {branch}")
+
+    last = sh(["git", "log", "-1", "--format=%h%x00%s"], root, check=False).stdout.strip()
+    if last:
+        parts = last.split("\x00", 1)
+        subject = (parts[1] if len(parts) > 1 else "")[:60]
+        lines.append(f"Dernier commit : {parts[0]} {subject}".rstrip())
+    else:
+        lines.append("Dernier commit : (aucun)")
+
+    origin_ref = f"origin/{default}"
+    has_origin = sh(["git", "rev-parse", "--verify", "--quiet", origin_ref], root, check=False).returncode == 0
+    if has_origin:
+        counts = sh(["git", "rev-list", "--left-right", "--count", f"{origin_ref}...HEAD"], root, check=False)
+        parts = counts.stdout.split()
+        if len(parts) == 2:
+            behind, ahead = int(parts[0]), int(parts[1])
+            lines.append(f"Écart {origin_ref} : +{ahead} / -{behind}")
+
+    with db._connect() as conn:
+        state_rows = conn.execute(
+            "SELECT state, COUNT(*) AS n FROM tickets WHERE project_id = ? GROUP BY state", (project_id,)
+        ).fetchall()
+        cost_row = conn.execute(
+            "SELECT COALESCE(SUM(cost_eur), 0) AS eur, COUNT(*) AS n FROM runs "
+            "WHERE project_id = ? AND date(created_at) = date('now')",
+            (project_id,),
+        ).fetchone()
+    counts = {row["state"]: int(row["n"]) for row in state_rows}
+    state_order = ["READY", "ASSIGNED", "GATE0", "GATE1", "GATE2", "VALIDATED", "PR_OPEN", "MERGED",
+                   "ABANDONED", "BLOCKED"]
+    ordered = [s for s in state_order if counts.get(s)]
+    ordered += sorted(s for s in counts if s not in state_order)
+    if ordered:
+        lines.append("TICKETS : " + " · ".join(f"{s} {counts[s]}" for s in ordered))
+    else:
+        lines.append("TICKETS : aucun")
+
+    queue = db.get_prioritized_queue(project_id)
+    for state in ("PR_OPEN", "GATE2", "ASSIGNED", "READY"):
+        ids = [t["id"] for t in queue if t.get("state") == state]
+        lines.append(f"{state} ({len(ids)}) : " + (", ".join(ids) if ids else "-"))
+
+    if queue:
+        nxt = queue[0]
+        lines.append(
+            f"PROCHAIN : {nxt['id']} {nxt.get('priority', '')} [{nxt.get('complexity', '')}] "
+            f"{nxt.get('state', '')} {(nxt.get('title') or '')[:60]}".rstrip()
+        )
+    else:
+        lines.append("PROCHAIN : aucun")
+
+    lines.append(f"COÛT DU JOUR : {float(cost_row['eur']):.4f} € ({int(cost_row['n'])} run(s))")
+
+    events = db.recent_events(project_id, limit=3)
+    lines.append("DERNIERS ÉVÉNEMENTS")
+    if events:
+        for e in reversed(events):
+            ts = str(e.get("created_at") or "")
+            hhmm = ts[11:16] if len(ts) >= 16 else "..:.."
+            tid = str(e.get("ticket_id") or "-")
+            kind = str(e.get("kind") or "")
+            detail = str(e.get("detail") or "").replace("\n", " ")[:60]
+            lines.append(f"  {hhmm} {tid:<7} {kind:<16} {detail}".rstrip())
+    else:
+        lines.append("  aucun")
+
+    return "\n".join(lines[:30])
+
+
 def _format_status_ticket(t: dict[str, Any], indent: str = "") -> str:
     owner = t.get("owner") or "auto"
     lane = t.get("lane") or "-"
@@ -1564,6 +1644,9 @@ def main(argv: list[str] | None = None) -> int:
     p_status = sub.add_parser("status", help="État synthétique du projet (0 token)")
     p_status.add_argument("project", nargs="?", default=default_project)
 
+    p_brief = sub.add_parser("brief", help="Brief de reprise du projet (0 token, sans réseau)")
+    p_brief.add_argument("project", nargs="?", default=default_project)
+
     p_note = sub.add_parser("note", help="Enregistre une note utile aux autres agents (0 token)")
     p_note.add_argument("ticket")
     p_note.add_argument("project", nargs="?", default=default_project)
@@ -1613,6 +1696,11 @@ def main(argv: list[str] | None = None) -> int:
             except PipelineError as exc:
                 say(f"sync : {exc}")
             print(build_status(db, args.project))
+            return 0
+        if args.cmd == "brief":
+            if not args.project:
+                raise PipelineError("Projet manquant : cockpit brief <projet>")
+            print(brief_project(db, args.project))
             return 0
         if args.cmd == "note":
             if not args.project:
