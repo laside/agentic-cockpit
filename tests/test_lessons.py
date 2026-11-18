@@ -6,23 +6,28 @@ aucun LLM, aucun accès à la base réelle db/cockpit_pmo.db.
 """
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 COCKPIT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(COCKPIT_ROOT))
 
 from core.lessons import (  # noqa: E402
+    CATEGORIES,
     FAILURE_KINDS,
     MAX_RULES,
     MIN_OCCURRENCES,
     SECTION_BEGIN,
     SECTION_END,
     apply_rules,
+    classify_failures,
     collect_failures,
     group_recurring,
     main,
@@ -30,6 +35,20 @@ from core.lessons import (  # noqa: E402
     propose_rules,
     render_section,
 )
+
+REGLE_TEST_CONTRAT = "Écris un test d'acceptation couvrant un comportement du contrat."
+REGLE_PERIMETRE = "Ne modifie que FILES_OWNED ; annule le reste."
+REGLE_AUCUN_FICHIER = "Crée ou modifie au moins un fichier de FILES_OWNED ; pas de diff vide."
+REGLE_DONNEE_PRIVEE = "Données factices (example.com, 192.0.2.x) uniquement ; aucun secret."
+REGLE_PORTE_INTEGRATION = "Ramène la branche principale, résous les conflits, rejoue lint/tests."
+
+DETAILS_REPRESENTATIFS = {
+    "test_contrat": "Il manque un test d'acceptation du contrat",
+    "perimetre_files_owned": "Un fichier hors perimetre a ete modifie",
+    "aucun_fichier_modifie": "Aucune modification : le diff vide est refuse",
+    "donnee_privee": "Le detail contient une donnee privee a masquer",
+    "porte_integration": "Conflit de fusion pendant le merge",
+}
 
 
 def _cree_base(db_path: Path, evenements: list[tuple[str, str, str]]) -> None:
@@ -55,7 +74,175 @@ def _cree_base(db_path: Path, evenements: list[tuple[str, str, str]]) -> None:
             )
 
 
-class TestCollecteEtRegroupement(unittest.TestCase):
+def _echec(kind: str, detail: str, ticket: str = "T-1") -> dict[str, object]:
+    return {"ticket_id": ticket, "kind": kind, "detail": detail}
+
+
+def _echecs(kind: str, detail: str, nombre: int) -> list[dict[str, object]]:
+    return [_echec(kind, detail, f"T-{index + 1}") for index in range(nombre)]
+
+
+class TestCategoriesEtClassification(unittest.TestCase):
+    def test_categories_exactes_et_ordonnees(self) -> None:
+        self.assertIsInstance(CATEGORIES, tuple)
+        identifiants = [categorie["id"] for categorie in CATEGORIES]
+        self.assertEqual(
+            identifiants,
+            [
+                "test_contrat",
+                "perimetre_files_owned",
+                "aucun_fichier_modifie",
+                "donnee_privee",
+                "porte_integration",
+            ],
+        )
+        regles = {categorie["id"]: categorie["rule"] for categorie in CATEGORIES}
+        self.assertEqual(regles["test_contrat"], REGLE_TEST_CONTRAT)
+        self.assertEqual(regles["perimetre_files_owned"], REGLE_PERIMETRE)
+        self.assertEqual(regles["aucun_fichier_modifie"], REGLE_AUCUN_FICHIER)
+        self.assertEqual(regles["donnee_privee"], REGLE_DONNEE_PRIVEE)
+        self.assertEqual(regles["porte_integration"], REGLE_PORTE_INTEGRATION)
+        for categorie in CATEGORIES:
+            self.assertTrue(categorie["keywords"])
+            self.assertIsInstance(categorie["keywords"], tuple)
+
+    def test_un_detail_representatif_par_categorie(self) -> None:
+        echecs = [
+            _echec("GATE0_FAIL", detail, f"T-{index}")
+            for index, detail in enumerate(DETAILS_REPRESENTATIFS.values(), start=1)
+        ]
+        groupes = classify_failures(echecs, min_occurrences=1)
+        par_categorie = {groupe["category"]: groupe for groupe in groupes}
+        self.assertEqual(set(par_categorie), set(DETAILS_REPRESENTATIFS))
+        for identifiant, detail in DETAILS_REPRESENTATIFS.items():
+            self.assertEqual(par_categorie[identifiant]["category"], identifiant)
+            self.assertEqual(
+                par_categorie[identifiant]["rule"],
+                next(c["rule"] for c in CATEGORIES if c["id"] == identifiant),
+            )
+            self.assertIn(detail, par_categorie[identifiant]["examples"])
+
+    def test_premiere_correspondance_par_ordre_de_priorite(self) -> None:
+        detail = "un test du contrat malgre un conflit de merge"
+        groupes = classify_failures([_echec("GATE0_FAIL", detail)], min_occurrences=1)
+        self.assertEqual(groupes[0]["category"], "test_contrat")
+
+    def test_repli_par_kind_privacy_et_integration(self) -> None:
+        echecs = [
+            _echec("PR_PRIVACY_FAIL", "xyz"),
+            _echec("INTEGRATION_FAIL", "xyz"),
+        ]
+        groupes = classify_failures(echecs, min_occurrences=1)
+        categories = {groupe["category"] for groupe in groupes}
+        self.assertIn("donnee_privee", categories)
+        self.assertIn("porte_integration", categories)
+
+    def test_detail_sans_mot_cle_et_kind_non_mappe_est_ignore(self) -> None:
+        echecs = _echecs("GATE1_FAIL", "erreur de compilation isolee", MIN_OCCURRENCES)
+        groupes = classify_failures(echecs)
+        self.assertEqual(groupes, [])
+        self.assertEqual(propose_rules(groupes), [])
+
+    def test_seuil_inclusif_deux_absent_trois_present_et_min_deux(self) -> None:
+        detail = "Il manque un test de contrat"
+        deux = classify_failures(_echecs("GATE0_FAIL", detail, 2))
+        self.assertEqual(deux, [])
+
+        groupes = classify_failures(_echecs("GATE0_FAIL", detail, 3))
+        self.assertEqual(len(groupes), 1)
+        self.assertEqual(groupes[0]["category"], "test_contrat")
+        self.assertEqual(groupes[0]["count"], 3)
+
+        abaisses = classify_failures(_echecs("GATE0_FAIL", detail, 2), min_occurrences=2)
+        self.assertEqual(len(abaisses), 1)
+        self.assertEqual(abaisses[0]["category"], "test_contrat")
+        self.assertEqual(abaisses[0]["count"], 2)
+
+    def test_regle_emise_sans_interpolation_du_motif_ni_du_detail(self) -> None:
+        detail = "test contrat ticket T-051 chemin /tmp/exemple"
+        groupes = classify_failures(_echecs("GATE0_FAIL", detail, 3))
+        self.assertEqual(len(groupes), 1)
+        self.assertEqual(groupes[0]["rule"], REGLE_TEST_CONTRAT)
+        self.assertNotIn("T-051", groupes[0]["rule"])
+        self.assertNotIn(detail, groupes[0]["rule"])
+        self.assertEqual(propose_rules(groupes), [REGLE_TEST_CONTRAT])
+
+    def test_kinds_examples_et_tri(self) -> None:
+        echecs = [
+            _echec("GATE0_FAIL", "test contrat un", "T-1"),
+            _echec("GATE1_FAIL", "test contrat deux", "T-2"),
+            _echec("GATE0_FAIL", "test contrat trois", "T-3"),
+            _echec("GATE0_FAIL", "test contrat un", "T-4"),
+            _echec("GATE0_FAIL", "donnee privee", "T-5"),
+            _echec("GATE0_FAIL", "donnee privee", "T-6"),
+            _echec("GATE0_FAIL", "donnee privee", "T-7"),
+            _echec("GATE0_FAIL", "donnee privee", "T-8"),
+        ]
+        groupes = classify_failures(echecs)
+        self.assertEqual([g["category"] for g in groupes], ["donnee_privee", "test_contrat"])
+        contrat = next(g for g in groupes if g["category"] == "test_contrat")
+        self.assertEqual(contrat["count"], 4)
+        self.assertEqual(contrat["kinds"], ["GATE0_FAIL", "GATE1_FAIL"])
+        self.assertLessEqual(len(contrat["examples"]), 2)
+        self.assertEqual(len(contrat["examples"]), len(set(contrat["examples"])))
+
+    def test_tri_a_count_egal_par_categorie(self) -> None:
+        echecs = []
+        for detail in DETAILS_EGALITE:
+            echecs.extend(_echecs("GATE0_FAIL", detail, 3))
+        groupes = classify_failures(echecs)
+        self.assertEqual(
+            [g["category"] for g in groupes],
+            sorted(g["category"] for g in groupes),
+        )
+
+
+DETAILS_EGALITE = [
+    "un test de contrat",
+    "une donnee privee",
+    "un conflit de fusion",
+]
+
+
+class TestPropositionEtRendu(unittest.TestCase):
+    def test_propose_rules_deduit_casse_et_espaces(self) -> None:
+        categories = [
+            {"rule": "Règle A"},
+            {"rule": "  règle   a  "},
+            {"rule": "Règle B"},
+        ]
+        self.assertEqual(propose_rules(categories), ["Règle A", "Règle B"])
+
+    def test_propose_rules_plafonne_a_max_rules(self) -> None:
+        categories = [{"rule": f"Règle {index}"} for index in range(MAX_RULES + 5)]
+        regles = propose_rules(categories)
+        self.assertEqual(len(regles), MAX_RULES)
+        self.assertEqual(len(regles), len({regle.lower() for regle in regles}))
+
+    def test_propose_rules_omet_les_regles_avec_motif_prive(self) -> None:
+        categories = [
+            {"rule": REGLE_DONNEE_PRIVEE},
+            {"rule": "Règle publique"},
+        ]
+        with mock.patch(
+            "core.lessons._private_hits",
+            side_effect=lambda texte: ["mot-interdit#1"] if "Données factices" in texte else [],
+        ):
+            regles = propose_rules(categories)
+        self.assertEqual(regles, ["Règle publique"])
+
+    def test_render_section_un_seul_bloc(self) -> None:
+        texte = render_section(["Première règle", "Deuxième règle"])
+        self.assertTrue(texte.startswith(SECTION_BEGIN))
+        self.assertTrue(texte.endswith(SECTION_END))
+        self.assertEqual(texte.count(SECTION_BEGIN), 1)
+        self.assertEqual(texte.count(SECTION_END), 1)
+        lignes = texte.splitlines()
+        self.assertIn("- Première règle", lignes)
+        self.assertIn("- Deuxième règle", lignes)
+
+
+class TestCollecte(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.tmp.name)
@@ -84,22 +271,6 @@ class TestCollecteEtRegroupement(unittest.TestCase):
         db = self.tmp_path / "absente.db"
         self.assertEqual(collect_failures(db, "demo"), [])
         self.assertFalse(db.exists())
-
-    def test_trois_occurrences_produisent_une_regle_deux_non(self) -> None:
-        motif = "Gate0: échec de compilation du module paiement"
-        db_trois = self.tmp_path / "trois.db"
-        _cree_base(db_trois, [("T-1", "GATE0_FAIL", motif), ("T-2", "GATE0_FAIL", motif),
-                              ("T-3", "GATE0_FAIL", motif)])
-        groupes = group_recurring(collect_failures(db_trois, "demo"))
-        self.assertEqual(len(groupes), 1)
-        self.assertEqual(groupes[0]["count"], 3)
-        self.assertGreaterEqual(len(propose_rules(groupes)), 1)
-
-        db_deux = self.tmp_path / "deux.db"
-        _cree_base(db_deux, [("T-1", "GATE0_FAIL", motif), ("T-2", "GATE0_FAIL", motif)])
-        groupes_deux = group_recurring(collect_failures(db_deux, "demo"))
-        self.assertEqual(groupes_deux, [])
-        self.assertEqual(propose_rules(groupes_deux), [])
 
     def test_group_recurring_normalise_et_trie(self) -> None:
         failures = [
@@ -142,15 +313,12 @@ class TestCollecteEtRegroupement(unittest.TestCase):
         self.assertNotIn("  ", motif)
 
     def test_propose_rules_deduit_et_borne(self) -> None:
-        groupes = [
-            {"motif": f"motif {i}", "count": MIN_OCCURRENCES + i, "kinds": ["GATE0_FAIL"],
-             "examples": ["exemple"]}
-            for i in range(MAX_RULES + 5)
-        ]
-        groupes.append(dict(groupes[0]))
-        regles = propose_rules(groupes)
+        categories = [{"rule": "Règle A"}, {"rule": "  règle   a  "}]
+        categories.extend({"rule": f"Règle {index}"} for index in range(MAX_RULES + 5))
+        regles = propose_rules(categories)
         self.assertLessEqual(len(regles), MAX_RULES)
-        self.assertEqual(len(regles), len({r.strip().lower() for r in regles}))
+        self.assertEqual(len(regles), len({regle.strip().lower() for regle in regles}))
+        self.assertEqual(regles[0], "Règle A")
 
     def test_collect_failures_utilise_les_types_publics(self) -> None:
         db = self.tmp_path / "publics.db"
@@ -170,23 +338,13 @@ class TestCollecteEtRegroupement(unittest.TestCase):
         self.assertNotIn("AUTRE", [f["kind"] for f in failures])
 
 
-class TestRenduEtApplication(unittest.TestCase):
+class TestApplication(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.tmp.name)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
-
-    def test_render_section_un_seul_bloc(self) -> None:
-        texte = render_section(["Première règle", "Deuxième règle"])
-        self.assertTrue(texte.startswith(SECTION_BEGIN))
-        self.assertTrue(texte.endswith(SECTION_END))
-        self.assertEqual(texte.count(SECTION_BEGIN), 1)
-        self.assertEqual(texte.count(SECTION_END), 1)
-        lignes = texte.splitlines()
-        self.assertIn(f"- Première règle", lignes)
-        self.assertIn(f"- Deuxième règle", lignes)
 
     def test_apply_rules_idempotent(self) -> None:
         cible = self.tmp_path / "AGENTS.md"
@@ -230,7 +388,7 @@ class TestRenduEtApplication(unittest.TestCase):
         self.assertTrue(texte.endswith(apres))
         self.assertEqual(texte.count(SECTION_BEGIN), 1)
         self.assertEqual(texte.count(SECTION_END), 1)
-        self.assertEqual(sum(1 for l in texte.splitlines() if l.startswith("- ")), MAX_RULES)
+        self.assertEqual(sum(1 for ligne in texte.splitlines() if ligne.startswith("- ")), MAX_RULES)
         self.assertNotIn("Règle 20", texte)
 
     def test_apply_rules_ajoute_en_fin_si_absent(self) -> None:
@@ -280,10 +438,14 @@ class TestMain(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.tmp.name)
         self.db = self.tmp_path / "cockpit.db"
-        motif = "Gate0: échec de compilation du module paiement"
+        detail = "Il manque un test d'acceptation du contrat"
         _cree_base(
             self.db,
-            [("T-1", "GATE0_FAIL", motif), ("T-2", "GATE0_FAIL", motif), ("T-3", "GATE0_FAIL", motif)],
+            [
+                ("T-1", "GATE0_FAIL", detail),
+                ("T-2", "GATE0_FAIL", detail),
+                ("T-3", "GATE0_FAIL", detail),
+            ],
         )
 
     def tearDown(self) -> None:
@@ -292,39 +454,52 @@ class TestMain(unittest.TestCase):
     def test_main_sans_apply_n_ecrit_aucun_fichier(self) -> None:
         cible = self.tmp_path / "AGENTS.md"
         cible.write_text("SENTINELLE\n", encoding="utf-8")
-        code = main(["demo", "--db", str(self.db), "--rules", str(cible)])
+        with redirect_stdout(io.StringIO()):
+            code = main(["demo", "--db", str(self.db), "--rules", str(cible)])
         self.assertEqual(code, 0)
         self.assertEqual(cible.read_text(encoding="utf-8"), "SENTINELLE\n")
 
     def test_main_sans_apply_ne_cree_pas_le_fichier(self) -> None:
         cible = self.tmp_path / "absent.md"
-        code = main(["demo", "--db", str(self.db), "--rules", str(cible)])
+        with redirect_stdout(io.StringIO()):
+            code = main(["demo", "--db", str(self.db), "--rules", str(cible)])
         self.assertEqual(code, 0)
         self.assertFalse(cible.exists())
 
     def test_main_apply_ecrit_dans_le_chemin_donne(self) -> None:
         cible = self.tmp_path / "AGENTS.md"
-        code = main(["demo", "--apply", "--db", str(self.db), "--rules", str(cible)])
+        with redirect_stdout(io.StringIO()):
+            code = main(["demo", "--apply", "--db", str(self.db), "--rules", str(cible)])
         self.assertEqual(code, 0)
         texte = cible.read_text(encoding="utf-8")
         self.assertEqual(texte.count(SECTION_BEGIN), 1)
-        self.assertIn("\n- ", texte)
+        self.assertIn(f"- {REGLE_TEST_CONTRAT}", texte)
 
     def test_main_min_ajuste_le_seuil(self) -> None:
         db = self.tmp_path / "deux.db"
+        detail = "Il manque un test de contrat"
         _cree_base(
             db,
-            [("T-1", "GATE0_FAIL", "Echec identique"), ("T-2", "GATE0_FAIL", "Echec identique")],
+            [("T-1", "GATE0_FAIL", detail), ("T-2", "GATE0_FAIL", detail)],
         )
         cible = self.tmp_path / "AGENTS.md"
-        self.assertEqual(main(["demo", "--apply", "--min", "2", "--db", str(db), "--rules", str(cible)]), 0)
-        self.assertIn("- ", cible.read_text(encoding="utf-8"))
+        with redirect_stdout(io.StringIO()):
+            code = main(["demo", "--apply", "--min", "2", "--db", str(db), "--rules", str(cible)])
+        self.assertEqual(code, 0)
+        self.assertIn(f"- {REGLE_TEST_CONTRAT}", cible.read_text(encoding="utf-8"))
 
-    def test_main_json_n_ecrit_rien(self) -> None:
+    def test_main_json_expose_groupes_classes_et_regles(self) -> None:
         cible = self.tmp_path / "AGENTS.md"
-        code = main(["demo", "--json", "--db", str(self.db), "--rules", str(cible)])
+        sortie = io.StringIO()
+        with redirect_stdout(sortie):
+            code = main(["demo", "--json", "--db", str(self.db), "--rules", str(cible)])
         self.assertEqual(code, 0)
         self.assertFalse(cible.exists())
+        donnees = json.loads(sortie.getvalue())
+        self.assertEqual(donnees["project"], "demo")
+        self.assertEqual(donnees["groups"][0]["category"], "test_contrat")
+        self.assertEqual(donnees["groups"][0]["count"], 3)
+        self.assertEqual(donnees["rules"], [REGLE_TEST_CONTRAT])
 
 
 if __name__ == "__main__":
