@@ -145,14 +145,14 @@ class TestPrivacyCheck(unittest.TestCase):
 
     def test_generic_flag_checks_paths_for_private_ip_without_leaking_name(self) -> None:
         """--generic applique l'IPv4 RFC1918 aux chemins sans afficher le nom."""
-        target = self.repo / "10.42.0.7.txt"
+        target = self.repo / "10.42.0.7.txt"  # privacy-check: allow
         target.write_text("Contenu public.\n", encoding="utf-8")
-        _git(self.repo, "add", "10.42.0.7.txt")
+        _git(self.repo, "add", "10.42.0.7.txt")  # privacy-check: allow
 
         res = self._run_check("--generic")
         self.assertEqual(res.returncode, 1)
         self.assertIn("ipv4-rfc1918", res.stdout)
-        self.assertNotIn("10.42.0.7", res.stdout)
+        self.assertNotIn("10.42.0.7", res.stdout)  # privacy-check: allow
 
     def test_generic_flag_ignores_deny_words_in_paths(self) -> None:
         """--generic n'applique pas la liste privée aux chemins."""
