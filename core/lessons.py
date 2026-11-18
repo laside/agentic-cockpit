@@ -126,13 +126,22 @@ def group_recurring(
     return resultat
 
 
+def _private_hits(text: str) -> list[str]:
+    """Motifs privés (liste interdite) : une règle qui en contient n'est jamais proposée."""
+    try:
+        from pipeline import private_text_hits
+    except ImportError:
+        from core.pipeline import private_text_hits  # type: ignore[no-redef]
+    return private_text_hits(text)
+
+
 def propose_rules(groupes: list[dict[str, Any]]) -> list[str]:
     """Propose des règles courtes, déterministes et dédupliquées (au plus MAX_RULES)."""
     regles: list[str] = []
     vues: set[str] = set()
     for groupe in groupes:
         motif = str(groupe.get("motif", "") or "").strip()
-        if not motif:
+        if not motif or _private_hits(motif):
             continue
         count = int(groupe.get("count", 0) or 0)
         kinds = ", ".join(str(k) for k in (groupe.get("kinds") or []))
