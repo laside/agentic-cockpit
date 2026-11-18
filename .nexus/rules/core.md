@@ -4,3 +4,6 @@
 - TDD : écrire le test avant l'implémentation ; tests verts avant de terminer. Les tests n'appellent ni réseau ni LLM.
 - Python stdlib uniquement, compatible 3.12. Messages et commentaires en français.
 - Ne jamais modifier la base réelle `db/cockpit_pmo.db` : les tests utilisent une base temporaire.
+<!-- BEGIN COCKPIT LESSONS -->
+- Écris un test d'acceptation couvrant un comportement du contrat.
+<!-- END COCKPIT LESSONS -->
