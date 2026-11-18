@@ -265,7 +265,7 @@ class MergeGithubTests(unittest.TestCase):
         self.assertEqual(pipeline.commit_identity_leaks(self.root, "HEAD"), [])
 
     def test_commit_identity_leaks_flags_unknown_github_email(self) -> None:
-        git(self.root, "config", "user.email", "inconnu@github.com")
+        git(self.root, "config", "user.email", "inconnu@github.com")  # privacy-check: allow
         (self.root / "identite.txt").write_text("2\n", encoding="utf-8")
         git(self.root, "add", "identite.txt")
         git(self.root, "commit", "-q", "-m", "identite inconnue")
