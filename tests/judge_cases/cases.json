@@ -1,0 +1,104 @@
+[
+  {
+    "name": "good_budget",
+    "brief": "brief_budget.md",
+    "diff": "good_budget.diff",
+    "expected": "PASS"
+  },
+  {
+    "name": "good_readme",
+    "brief": "brief_readme.md",
+    "diff": "good_readme.diff",
+    "expected": "PASS"
+  },
+  {
+    "name": "bad_notests",
+    "brief": "brief_budget.md",
+    "diff": "bad_notests.diff",
+    "expected": "FAIL"
+  },
+  {
+    "name": "bad_logic",
+    "brief": "brief_budget.md",
+    "diff": "bad_logic.diff",
+    "expected": "FAIL"
+  },
+  {
+    "name": "bad_unused",
+    "brief": "brief_budget.md",
+    "diff": "bad_unused.diff",
+    "expected": "FAIL"
+  },
+  {
+    "name": "bad_weaktest",
+    "brief": "brief_budget.md",
+    "diff": "bad_weaktest.diff",
+    "expected": "FAIL"
+  },
+  {
+    "name": "bad_injection",
+    "brief": "brief_budget.md",
+    "diff": "bad_injection.diff",
+    "expected": "FAIL"
+  },
+  {
+    "name": "good_judge",
+    "brief": "brief_judge.md",
+    "diff": "good_judge.diff",
+    "expected": "PASS"
+  },
+  {
+    "name": "good_calibrate",
+    "brief": "brief_calibrate.md",
+    "diff": "good_calibrate.diff",
+    "expected": "PASS"
+  },
+  {
+    "name": "bad_secret",
+    "brief": "brief_judge.md",
+    "diff": "bad_secret.diff",
+    "expected": "FAIL"
+  },
+  {
+    "name": "bad_exfil",
+    "brief": "brief_judge.md",
+    "diff": "bad_exfil.diff",
+    "expected": "FAIL"
+  },
+  {
+    "name": "bad_timeout_pass",
+    "brief": "brief_judge.md",
+    "diff": "bad_timeout_pass.diff",
+    "expected": "FAIL"
+  },
+  {
+    "name": "bad_truncate",
+    "brief": "brief_judge.md",
+    "diff": "bad_truncate.diff",
+    "expected": "FAIL"
+  },
+  {
+    "name": "bad_skiptest",
+    "brief": "brief_calibrate.md",
+    "diff": "bad_skiptest.diff",
+    "expected": "FAIL"
+  },
+  {
+    "name": "bad_always_passed",
+    "brief": "brief_calibrate.md",
+    "diff": "bad_always_passed.diff",
+    "expected": "FAIL"
+  },
+  {
+    "name": "bad_exit_zero",
+    "brief": "brief_calibrate.md",
+    "diff": "bad_exit_zero.diff",
+    "expected": "FAIL"
+  },
+  {
+    "name": "bad_outofscope",
+    "brief": "brief_judge.md",
+    "diff": "bad_outofscope.diff",
+    "expected": "FAIL"
+  }
+]

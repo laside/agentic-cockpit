@@ -1,0 +1,217 @@
+diff --git a/core/pipeline.py b/core/pipeline.py
+index 1458ba6..a8640f7 100644
+--- a/core/pipeline.py
++++ b/core/pipeline.py
+@@ -1070,6 +1070,13 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
+             lim = int(r_cfg["max_parallel"])
+             limits[prov] = min(limits[prov], lim) if prov in limits else lim
+     provider_limits: dict[str, int] | None = limits if limits else None
++    max_cost_eur = float(getattr(args, "max_cost_eur", 0.0) or 0.0) or None
++    with db._connect() as conn:
++        run_marker = int(
++            conn.execute(
++                "SELECT COALESCE(MAX(id), 0) FROM runs WHERE project_id = ?", (projet,)
++            ).fetchone()[0]
++        )
+ 
+     while True:
+         slots = min(args.slots, args.max_tickets - done)
+@@ -1143,10 +1150,23 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
+                         say(str(exc))
+                         escalations_in_a_row += 1
+ 
+-        reason = scheduler.should_stop(done, escalations_in_a_row, args.max_tickets, args.max_escalations)
++        with db._connect() as conn:
++            spent_eur = float(
++                conn.execute(
++                    "SELECT COALESCE(SUM(cost_eur), 0) FROM runs WHERE project_id = ? AND id > ?",
++                    (projet, run_marker),
++                ).fetchone()[0]
++            )
++        reason = scheduler.should_stop(
++            done, escalations_in_a_row, args.max_tickets, args.max_escalations,
++            spent_eur=spent_eur, max_cost_eur=max_cost_eur,
++        )
+         if reason is not None:
+             db.add_event(projet, None, "AUTO_STOP", reason)
+-            say(f"Arrêt : {reason}")
++            if reason == "budget":
++                say(f"Arrêt : budget ({spent_eur:.2f} € dépensés)")
++            else:
++                say(f"Arrêt : {reason}")
+             return 0
+ 
+ 
+@@ -1172,6 +1192,7 @@ def main(argv: list[str] | None = None) -> int:
+     p_auto.add_argument("--slots", type=int, default=2)
+     p_auto.add_argument("--max-tickets", type=int, default=6)
+     p_auto.add_argument("--max-escalations", type=int, default=2)
++    p_auto.add_argument("--max-cost-eur", type=float, default=0.0)
+     p_auto.add_argument("--max-attempts", type=int, default=2)
+     p_auto.add_argument("--gate1", action="store_true")
+     p_auto.add_argument("--auto-merge", action="store_true")
+diff --git a/core/scheduler.py b/core/scheduler.py
+index 1e0fbba..a91b7ff 100644
+--- a/core/scheduler.py
++++ b/core/scheduler.py
+@@ -134,10 +134,14 @@ def should_stop(
+     escalations_in_a_row: int,
+     max_tickets: int = 6,
+     max_escalations: int = 2,
++    spent_eur: float = 0.0,
++    max_cost_eur: float | None = None,
+ ) -> str | None:
+     """Détermine si la boucle d'exécution doit s'arrêter."""
+     if done >= max_tickets:
+         return "max_tickets"
+     if escalations_in_a_row >= max_escalations:
+         return "escalades"
++    if max_cost_eur is not None and spent_eur <= max_cost_eur:
++        return "budget"
+     return None
+diff --git a/tests/test_pipeline.py b/tests/test_pipeline.py
+index a9a2e32..54f934c 100644
+--- a/tests/test_pipeline.py
++++ b/tests/test_pipeline.py
+@@ -511,6 +511,101 @@ class PipelineTests(unittest.TestCase):
+             ).fetchone()["window_used_pct"]
+         self.assertAlmostEqual(pct, 100.0)
+ 
++    def test_auto_stops_on_budget_after_batch(self) -> None:
++        """cmd_auto s'arrête sur « budget » après le lot quand la dépense atteint --max-cost-eur."""
++        import contextlib
++        import io
++
++        self.db.upsert_ticket("demo", "T-080", "Ticket budget 1", milestone_id="M1", complexity="S",
++                              files_owned=["a.py"])
++        self.db.upsert_ticket("demo", "T-081", "Ticket budget 2", milestone_id="M1", complexity="S",
++                              files_owned=["b.py"])
++
++        def fake_run(db: pmo_db.CockpitDB, project_id: str, ticket_id: str, **_: object) -> int:
++            db.record_run(project_id, ticket_id, attempt=1, lane="fake", provider="local", cost_eur=0.30)
++            db.update_ticket(project_id, ticket_id, state="GATE2")
++            return 0
++
++        orig_run = pipeline.run_ticket
++        buf = io.StringIO()
++        try:
++            pipeline.run_ticket = fake_run  # type: ignore[assignment]
++            with contextlib.redirect_stdout(buf):
++                code = pipeline.main([
++                    "auto", "demo", "--slots", "1", "--max-tickets", "6", "--max-cost-eur", "0.25"
++                ])
++        finally:
++            pipeline.run_ticket = orig_run  # type: ignore[assignment]
++
++        self.assertEqual(code, 0)
++        self.assertEqual(self.db.get_ticket("demo", "T-080")["state"], "GATE2")
++        self.assertEqual(self.db.get_ticket("demo", "T-081")["state"], "READY")
++        events = [(e["kind"], e["detail"]) for e in self.db.recent_events("demo", 20)]
++        self.assertIn(("AUTO_STOP", "budget"), events)
++        self.assertIn("Arrêt : budget", buf.getvalue())
++        self.assertIn("0.30", buf.getvalue())
++
++    def test_auto_without_max_cost_is_not_bounded_by_budget(self) -> None:
++        """Sans --max-cost-eur, aucune limite de budget n'arrête la boucle."""
++        import contextlib
++        import io
++
++        self.db.upsert_ticket("demo", "T-082", "Ticket sans budget 1", milestone_id="M1", complexity="S",
++                              files_owned=["a.py"])
++        self.db.upsert_ticket("demo", "T-083", "Ticket sans budget 2", milestone_id="M1", complexity="S",
++                              files_owned=["b.py"])
++
++        def fake_run(db: pmo_db.CockpitDB, project_id: str, ticket_id: str, **_: object) -> int:
++            db.record_run(project_id, ticket_id, attempt=1, lane="fake", provider="local", cost_eur=0.30)
++            db.update_ticket(project_id, ticket_id, state="GATE2")
++            return 0
++
++        orig_run = pipeline.run_ticket
++        try:
++            pipeline.run_ticket = fake_run  # type: ignore[assignment]
++            with contextlib.redirect_stdout(io.StringIO()):
++                code = pipeline.main(["auto", "demo", "--slots", "1", "--max-tickets", "6"])
++        finally:
++            pipeline.run_ticket = orig_run  # type: ignore[assignment]
++
++        self.assertEqual(code, 0)
++        self.assertEqual(self.db.get_ticket("demo", "T-082")["state"], "GATE2")
++        self.assertEqual(self.db.get_ticket("demo", "T-083")["state"], "GATE2")
++        events = [(e["kind"], e["detail"]) for e in self.db.recent_events("demo", 20)]
++        self.assertNotIn(("AUTO_STOP", "budget"), events)
++
++    def test_auto_budget_ignores_runs_before_start(self) -> None:
++        """Seuls les runs créés après le démarrage de la boucle comptent pour le budget."""
++        import contextlib
++        import io
++
++        self.db.record_run("demo", "T-OLD", attempt=1, lane="fake", provider="local", cost_eur=5.0)
++        self.db.upsert_ticket("demo", "T-084", "Ticket budget tardif 1", milestone_id="M1", complexity="S",
++                              files_owned=["a.py"])
++        self.db.upsert_ticket("demo", "T-085", "Ticket budget tardif 2", milestone_id="M1", complexity="S",
++                              files_owned=["b.py"])
++
++        def fake_run(db: pmo_db.CockpitDB, project_id: str, ticket_id: str, **_: object) -> int:
++            db.record_run(project_id, ticket_id, attempt=1, lane="fake", provider="local", cost_eur=0.0)
++            db.update_ticket(project_id, ticket_id, state="GATE2")
++            return 0
++
++        orig_run = pipeline.run_ticket
++        try:
++            pipeline.run_ticket = fake_run  # type: ignore[assignment]
++            with contextlib.redirect_stdout(io.StringIO()):
++                code = pipeline.main([
++                    "auto", "demo", "--slots", "1", "--max-tickets", "6", "--max-cost-eur", "0.25"
++                ])
++        finally:
++            pipeline.run_ticket = orig_run  # type: ignore[assignment]
++
++        self.assertEqual(code, 0)
++        self.assertEqual(self.db.get_ticket("demo", "T-084")["state"], "GATE2")
++        self.assertEqual(self.db.get_ticket("demo", "T-085")["state"], "GATE2")
++        events = [(e["kind"], e["detail"]) for e in self.db.recent_events("demo", 20)]
++        self.assertNotIn(("AUTO_STOP", "budget"), events)
++
+     def test_usage_format_opencode_json_records_real_tokens_cost_and_updates_quota(self) -> None:
+         """Worker écrivant du JSON opencode_json : runs reçoit tokens/cost_usd/cost_kind/cost_eur et quota_state augmente."""
+         runner = self.runner_cfg["runners"]["deepseek_coder"]
+diff --git a/tests/test_scheduler.py b/tests/test_scheduler.py
+index a2fb68c..1f8985a 100644
+--- a/tests/test_scheduler.py
++++ b/tests/test_scheduler.py
+@@ -193,6 +193,35 @@ class TestScheduler(unittest.TestCase):
+         self.assertEqual(should_stop(done=2, escalations_in_a_row=3, max_tickets=6, max_escalations=2), "escalades")
+         self.assertIsNone(should_stop(done=5, escalations_in_a_row=1, max_tickets=6, max_escalations=2))
+ 
++    def test_should_stop_budget(self) -> None:
++        """should_stop renvoie « budget » au seuil, jamais en dessous ni sans limite."""
++        self.assertEqual(
++            should_stop(done=1, escalations_in_a_row=0, spent_eur=0.30, max_cost_eur=0.25), "budget"
++        )
++        self.assertEqual(
++            should_stop(done=1, escalations_in_a_row=0, spent_eur=0.25, max_cost_eur=0.25), "budget"
++        )
++        self.assertIsNone(
++            should_stop(done=1, escalations_in_a_row=0, spent_eur=0.24, max_cost_eur=0.25)
++        )
++        self.assertIsNone(
++            should_stop(done=1, escalations_in_a_row=0, spent_eur=99.0, max_cost_eur=None)
++        )
++        self.assertIsNone(should_stop(done=1, escalations_in_a_row=0))
++
++    def test_should_stop_budget_keeps_other_priorities(self) -> None:
++        """max_tickets et escalades restent prioritaires sur budget."""
++        self.assertEqual(
++            should_stop(done=6, escalations_in_a_row=0, max_tickets=6, max_escalations=2,
++                        spent_eur=10.0, max_cost_eur=0.25),
++            "max_tickets",
++        )
++        self.assertEqual(
++            should_stop(done=2, escalations_in_a_row=2, max_tickets=6, max_escalations=2,
++                        spent_eur=10.0, max_cost_eur=0.25),
++            "escalades",
++        )
++
+     def test_normalized_relative_paths_conflict_in_batch_and_locks(self) -> None:
+         """(d) « ./shared.py » et « shared.py » ne sont jamais dans le même lot."""
+         self.db.set_mistral_key_active(True)

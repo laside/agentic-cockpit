@@ -20,10 +20,25 @@ choix de la voie) est fait sans LLM.
 6. **`cockpit auto <projet>`** : boucle bornée qui exécute les tickets prêts sans conflit de fichiers
    (`--dry-run` pour voir le lot sans rien lancer).
 
+## Travailler à plusieurs CLI
+Plusieurs agents peuvent collaborer sur un même projet sans messagerie :
+- **Architecte** : découpe les chantiers en tickets parents, `cockpit claim T-001 mon-projet --as claude`,
+  puis suit l'avancement avec `cockpit status mon-projet`.
+- **Chefs de chantier** : prennent leurs tickets avec `cockpit claim ... --as agy` (ou `deepseek`) et
+  découpent en enfants : `cockpit ticket add mon-projet "Titre" --files src/a.py --parent T-001`.
+- **Sous-agents headless** : exécutent les enfants avec `cockpit run T-002 mon-projet`, ou par lot avec
+  `cockpit auto mon-projet --parent T-001 --auto-merge --slots 2 --max-tickets 6` (`--dry-run` pour simuler).
+Cycle : `claim` -> `ticket add --parent` -> `run` / `auto --parent` -> `merge` des enfants -> `submit` du parent.
+`cockpit status mon-projet` remplace une messagerie ; `cockpit note T-001 mon-projet "texte"` consigne une
+information utile aux autres agents.
+Règle : seul l'architecte fusionne un chantier dans la branche principale.
+
 ## Voies (config/runners.toml)
 Une entrée par voie : `deepseek_coder` (opencode), `agy_standard` / `agy_argon` (Antigravity CLI),
-`mistral_vibe`, `local_pc` (opencode sur Ollama local), `local_nas_coder`. Pour ajouter un LLM ou un CLI :
-copier un bloc et faire pointer une voie dessus.
+`mistral_vibe`, `local_pc` (opencode sur Ollama local), `local_nas_coder`. Les voies `claude_haiku` et
+`claude_sonnet` sont des agents Claude headless : le Gouverneur ne les choisit jamais seul, on les demande
+explicitement avec `--lane` (`cockpit run T-001 mon-projet --lane claude_haiku`). Pour ajouter un LLM ou un
+CLI : copier un bloc et faire pointer une voie dessus.
 
 ## Organisation du dépôt
 - `bin/cockpit` : lanceur unique (`open`, `run`, `merge`, `auto`, `ticket`, `events`, `relaunch`, `new-project`, ...).
@@ -62,5 +77,6 @@ Ollama, Zellij. Le tableau de bord, le lanceur Zellij et le script `relaunch.sh`
 
 ## État
 Pipeline, portes, ordonnanceur, suivi des coûts et tableau de bord fonctionnent et sont couverts par des tests.
-Pas encore branchés : la Porte 1 statique dans `run_ticket`, le Sprint Fixer. La boucle `cockpit auto` n'a été
-éprouvée qu'avec des tests unitaires (faux worker) et en `--dry-run`.
+La Porte 1 statique est branchée dans `run_ticket` via l'option `require_tests` (un diff de code doit toucher
+un test). Le Sprint Fixer n'est pas branché. La boucle `cockpit auto` n'a été éprouvée qu'avec des tests
+unitaires (faux worker) et en essais supervisés.

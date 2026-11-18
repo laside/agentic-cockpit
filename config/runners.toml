@@ -15,9 +15,10 @@ require_tests = true
 [runners.deepseek_coder]
 agent = "deepseek"
 provider = "deepseek"
-cost_source = "opencode_stats"
+# Mesure réelle des tokens et du coût facturé à partir des évènements JSON d'opencode.
+usage_format = "opencode_json"
 # Modèle épinglé : sans --model, opencode peut retomber sur un modèle gratuit par défaut.
-argv = ["opencode", "run", "--model", "deepseek/deepseek-flash", "{prompt}"]
+argv = ["opencode", "run", "--format", "json", "--model", "deepseek/deepseek-flash", "{prompt}"]
 
 [runners.agy_standard]
 agent = "agy"
@@ -25,13 +26,15 @@ provider = "agy"
 # une seule session agy headless à la fois tant que la cohabitation n'est pas mesurée
 max_parallel = 1
 cost_source = "estimate"
+# Mesure réelle des tokens depuis la sortie JSON d'agy (aucun coût fourni par le CLI).
+usage_format = "agy_json"
 # valeurs à calibrer : estimation forfaitaire par run, pas une mesure
 window_pct_per_run = 4.0
 window_hours = 5.0
 estimated_cost_eur = 0.0
 estimated_tokens_in = 0
 estimated_tokens_out = 0
-argv = ["agy", "--print", "{prompt}", "--mode", "accept-edits"]
+argv = ["agy", "--print", "{prompt}", "--mode", "accept-edits", "--output-format", "json"]
 
 [runners.agy_argon]
 agent = "agy"
@@ -39,6 +42,8 @@ provider = "agy"
 # une seule session agy headless à la fois tant que la cohabitation n'est pas mesurée
 max_parallel = 1
 cost_source = "estimate"
+# Mesure réelle des tokens depuis la sortie JSON d'agy (aucun coût fourni par le CLI).
+usage_format = "agy_json"
 # valeurs à calibrer : estimation forfaitaire par run, pas une mesure
 window_pct_per_run = 12.0
 window_hours = 5.0
@@ -46,7 +51,7 @@ estimated_cost_eur = 0.0
 estimated_tokens_in = 0
 estimated_tokens_out = 0
 # Nom exact attendu par `agy --model` (voir la liste affichée par agy en cas de nom inconnu).
-argv = ["agy", "--model", "Gemini 4 Argon (High)", "--print", "{prompt}", "--mode", "accept-edits"]
+argv = ["agy", "--model", "Gemini 4 Argon (High)", "--print", "{prompt}", "--mode", "accept-edits", "--output-format", "json"]
 
 [runners.mistral_vibe]
 agent = "mistral"
@@ -59,13 +64,17 @@ argv = ["vibe", "--prompt", "{prompt}", "--max-turns", "12"]
 agent = "claude"
 provider = "claude"
 max_parallel = 2
-argv = ["claude", "-p", "{prompt}", "--model", "haiku", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Glob,Grep,Bash(python3:*),Bash(make:*)"]
+# Mesure réelle des tokens et de l'équivalent API depuis la sortie JSON de claude.
+usage_format = "claude_json"
+argv = ["claude", "-p", "{prompt}", "--output-format", "json", "--model", "haiku", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Glob,Grep,Bash(python3:*),Bash(make:*)"]
 
 [runners.claude_sonnet]
 agent = "claude"
 provider = "claude"
 max_parallel = 2
-argv = ["claude", "-p", "{prompt}", "--model", "sonnet", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Glob,Grep,Bash(python3:*),Bash(make:*)"]
+# Mesure réelle des tokens et de l'équivalent API depuis la sortie JSON de claude.
+usage_format = "claude_json"
+argv = ["claude", "-p", "{prompt}", "--output-format", "json", "--model", "sonnet", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Glob,Grep,Bash(python3:*),Bash(make:*)"]
 
 # RTX 3070 (Ollama local, 0 €) : worker validé le 2026-11-18 avec qwen3:8b (80 s, Porte 0 verte).
 # qwen2.5-coder:7b est écarté : il écrit l'appel d'outil en texte JSON au lieu de l'exécuter.
@@ -76,16 +85,24 @@ argv = ["claude", "-p", "{prompt}", "--model", "sonnet", "--permission-mode", "a
 agent = "local"
 provider = "local"
 timeout_s = 600
-argv = ["opencode", "run", "--model", "pc3070/qwen3-8b-16k", "{prompt}"]
+# Mesure réelle des tokens locaux depuis les évènements JSON d'opencode.
+usage_format = "opencode_json"
+argv = ["opencode", "run", "--format", "json", "--model", "pc3070/qwen3-8b-16k", "{prompt}"]
 env = { OPENCODE_CONFIG = "{cockpit}/config/opencode-local.json" }
 
 [runners.local_nas_coder]
 agent = "local"
 provider = "local"
-argv = ["opencode", "run", "--model", "local-coder", "{prompt}"]
+# Mesure réelle des tokens locaux depuis les évènements JSON d'opencode.
+usage_format = "opencode_json"
+argv = ["opencode", "run", "--format", "json", "--model", "local-coder", "{prompt}"]
 
-# Porte 1 : audit du diff par le modèle local du NAS (0 € cloud).
+# Porte 1 : audit du diff par le juge Claude Haiku en headless (ou modèle local du NAS si backend = "ollama").
 [gate1]
+backend = "claude"               # "claude" (juge Haiku headless) ou "ollama" (audit local NAS)
+judge_model = "haiku"            # modèle Claude utilisé par le juge de revue
+judge_timeout_s = 120            # durée maximale d'un appel au juge Claude (secondes)
+judge_max_diff_chars = 45000     # taille maximale du diff en caractères avant SKIPPED sans appel
 url = "http://192.168.0.10:11434"
 model = "Gemma4-ctx:32k"
 think = false            # mesuré : 2 à 4 s sans réflexion, verdicts corrects ; plusieurs minutes avec

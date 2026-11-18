@@ -1,0 +1,3 @@
+Ticket T-024 : README public : travail multi-CLI, voies Claude, état réel.
+Critères : (1) section « Travailler à plusieurs CLI » de 15 lignes au plus (rôles, cycle claim -> ticket add --parent -> run/auto --parent -> merge -> submit, cockpit status, cockpit note, règle « seul l'architecte fusionne un chantier dans la branche principale ») ; (2) liste des voies avec claude_haiku et claude_sonnet (jamais choisies seules, --lane) ; (3) section « État » corrigée (Porte 1 statique branchée, Sprint Fixer non branché) ; (4) tout le reste inchangé. Aucun nom privé, aucune IP, aucun chemin personnel.
+Périmètre : templates/README.public.md uniquement.

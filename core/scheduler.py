@@ -134,10 +134,14 @@ def should_stop(
     escalations_in_a_row: int,
     max_tickets: int = 6,
     max_escalations: int = 2,
+    spent_eur: float = 0.0,
+    max_cost_eur: float | None = None,
 ) -> str | None:
     """Détermine si la boucle d'exécution doit s'arrêter."""
     if done >= max_tickets:
         return "max_tickets"
     if escalations_in_a_row >= max_escalations:
         return "escalades"
+    if max_cost_eur is not None and spent_eur >= max_cost_eur:
+        return "budget"
     return None

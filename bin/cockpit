@@ -66,12 +66,18 @@ PY
   run|merge|ticket|events|auto|claim|submit|release|status|note)
     exec python3 "$COCKPIT_HOME/core/pipeline.py" "$CMD" "$@"
     ;;
+  costs)
+    exec python3 "$COCKPIT_HOME/core/costs_report.py" "$@"
+    ;;
+  judge-calibrate)
+    exec python3 "$COCKPIT_HOME/core/judge_calibrate.py" "$@"
+    ;;
   roadmap)
     PROJ="${1:-${PROJECT:-mon-app}}"
     python3 "$COCKPIT_HOME/tui/pmo_dashboard.py" --project "$PROJ" --db "$DB_PATH" --once
     ;;
   *)
-    echo "Usage: cockpit {open|switch|new-project|secret|roadmap|ticket|run|auto|claim|submit|release|status|note|dispatch|merge|events|relaunch}" >&2
+    echo "Usage: cockpit {open|switch|new-project|secret|costs|judge-calibrate|roadmap|ticket|run|auto|claim|submit|release|status|note|dispatch|merge|events|relaunch}" >&2
     exit 1
     ;;
 esac

@@ -1,0 +1,71 @@
+diff --git a/core/pipeline.py b/core/pipeline.py
+index 1458ba6..a8640f7 100644
+--- a/core/pipeline.py
++++ b/core/pipeline.py
+@@ -1070,6 +1070,13 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
+             lim = int(r_cfg["max_parallel"])
+             limits[prov] = min(limits[prov], lim) if prov in limits else lim
+     provider_limits: dict[str, int] | None = limits if limits else None
++    max_cost_eur = float(getattr(args, "max_cost_eur", 0.0) or 0.0) or None
++    with db._connect() as conn:
++        run_marker = int(
++            conn.execute(
++                "SELECT COALESCE(MAX(id), 0) FROM runs WHERE project_id = ?", (projet,)
++            ).fetchone()[0]
++        )
+ 
+     while True:
+         slots = min(args.slots, args.max_tickets - done)
+@@ -1143,10 +1150,23 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
+                         say(str(exc))
+                         escalations_in_a_row += 1
+ 
+-        reason = scheduler.should_stop(done, escalations_in_a_row, args.max_tickets, args.max_escalations)
++        with db._connect() as conn:
++            spent_eur = float(
++                conn.execute(
++                    "SELECT COALESCE(SUM(cost_eur), 0) FROM runs WHERE project_id = ? AND id > ?",
++                    (projet, run_marker),
++                ).fetchone()[0]
++            )
++        reason = scheduler.should_stop(
++            done, escalations_in_a_row, args.max_tickets, args.max_escalations,
++            spent_eur=spent_eur, max_cost_eur=max_cost_eur,
++        )
+         if reason is not None:
+             db.add_event(projet, None, "AUTO_STOP", reason)
+-            say(f"Arrêt : {reason}")
++            if reason == "budget":
++                say(f"Arrêt : budget ({spent_eur:.2f} € dépensés)")
++            else:
++                say(f"Arrêt : {reason}")
+             return 0
+ 
+ 
+@@ -1172,6 +1192,7 @@ def main(argv: list[str] | None = None) -> int:
+     p_auto.add_argument("--slots", type=int, default=2)
+     p_auto.add_argument("--max-tickets", type=int, default=6)
+     p_auto.add_argument("--max-escalations", type=int, default=2)
++    p_auto.add_argument("--max-cost-eur", type=float, default=0.0)
+     p_auto.add_argument("--max-attempts", type=int, default=2)
+     p_auto.add_argument("--gate1", action="store_true")
+     p_auto.add_argument("--auto-merge", action="store_true")
+diff --git a/core/scheduler.py b/core/scheduler.py
+index 1e0fbba..a91b7ff 100644
+--- a/core/scheduler.py
++++ b/core/scheduler.py
+@@ -134,10 +134,14 @@ def should_stop(
+     escalations_in_a_row: int,
+     max_tickets: int = 6,
+     max_escalations: int = 2,
++    spent_eur: float = 0.0,
++    max_cost_eur: float | None = None,
+ ) -> str | None:
+     """Détermine si la boucle d'exécution doit s'arrêter."""
+     if done >= max_tickets:
+         return "max_tickets"
+     if escalations_in_a_row >= max_escalations:
+         return "escalades"
++    if max_cost_eur is not None and spent_eur >= max_cost_eur:
++        return "budget"
+     return None

@@ -201,6 +201,9 @@ class CockpitDB:
                     gate1 TEXT DEFAULT '',
                     tokens_in INTEGER DEFAULT 0,
                     tokens_out INTEGER DEFAULT 0,
+                    tokens_cache INTEGER DEFAULT 0,
+                    cost_usd REAL DEFAULT 0.0,
+                    cost_kind TEXT DEFAULT '',
                     cost_eur REAL DEFAULT 0.0,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
@@ -218,6 +221,14 @@ class CockpitDB:
             ):
                 if col not in existing:
                     conn.execute(f"ALTER TABLE tickets ADD COLUMN {col} {ddl}")
+            existing_runs = {r["name"] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+            for col, ddl in (
+                ("tokens_cache", "INTEGER DEFAULT 0"),
+                ("cost_usd", "REAL DEFAULT 0.0"),
+                ("cost_kind", "TEXT DEFAULT ''"),
+            ):
+                if col not in existing_runs:
+                    conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {ddl}")
             defaults = [
                 ("claude", 0.0, 0.0, 0.0, 0.0, 0.0, 1),
                 ("agy", 0.0, 0.0, 0.0, 0.0, 0.0, 1),

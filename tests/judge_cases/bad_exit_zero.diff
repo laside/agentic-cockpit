@@ -1,0 +1,412 @@
+diff --git a/core/judge_calibrate.py b/core/judge_calibrate.py
+new file mode 100644
+index 0000000..5ef0acf
+--- /dev/null
++++ b/core/judge_calibrate.py
+@@ -0,0 +1,182 @@
++#!/usr/bin/env python3
++"""
++Calibration du juge de revue (T-027) : mesure honnête du taux de détection des
++mauvais diffs et du taux de faux positifs. Stdlib uniquement, aucun réseau.
++
++    python3 core/judge_calibrate.py [--runs N] [--cases DIR] [--json CHEMIN]
++"""
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import os
++import sys
++import time
++import tomllib
++from pathlib import Path
++from typing import Any
++
++CORE = Path(__file__).resolve().parent
++COCKPIT_HOME = Path(os.environ.get("COCKPIT_HOME", CORE.parent))
++RUNNERS_PATH = COCKPIT_HOME / "config" / "runners.toml"
++DEFAULT_CASES_DIR = COCKPIT_HOME / "tests" / "judge_cases"
++
++try:  # import packagé (core.judge_calibrate) ou exécution directe du script
++    from . import judge as judge_mod
++except ImportError:  # pragma: no cover - dépend du mode d'import
++    import judge as judge_mod  # type: ignore[no-redef]
++
++PROMPT_PATH = getattr(
++    judge_mod, "SYS_PROMPT_PATH", COCKPIT_HOME / "prompts" / "sys_judge_claude.md"
++)
++
++
++def _prompt_sha256() -> str:
++    """Hachage SHA-256 du prompt système du juge (chaîne vide si illisible)."""
++    try:
++        contenu = Path(PROMPT_PATH).read_bytes()
++    except OSError:
++        return ""
++    return hashlib.sha256(contenu).hexdigest()
++
++
++def _verdict_appele(juge, brief: str, diff: str, cfg: dict[str, Any]) -> str:
++    """Appelle le juge une fois et normalise le verdict en PASS | FAIL | SKIPPED."""
++    try:
++        resultat = juge(brief, diff, cfg)
++    except Exception:  # un juge en échec ne doit jamais faire passer un cas
++        return "SKIPPED"
++    if isinstance(resultat, str):
++        verdict = resultat
++    elif isinstance(resultat, (tuple, list)) and resultat:
++        verdict = resultat[0]
++    else:
++        verdict = "SKIPPED"
++    return verdict if verdict in ("PASS", "FAIL") else "SKIPPED"
++
++
++def calibrate(
++    cases_dir,
++    cfg: dict[str, Any],
++    runs: int = 1,
++    judge=None,
++) -> dict[str, Any]:
++    """Évalue le juge sur les cas de `cases_dir` et retourne les statistiques."""
++    base = Path(cases_dir)
++    entrees = json.loads((base / "cases.json").read_text(encoding="utf-8"))
++    nb_runs = max(int(runs), 1)
++    juge = judge if judge is not None else judge_mod.judge_diff
++
++    cas_resultats: list[dict[str, Any]] = []
++    detected = 0
++    bad_total = 0
++    false_positives = 0
++    good_total = 0
++    skipped = 0
++
++    for entree in entrees:
++        nom = str(entree.get("name", ""))
++        attendu = str(entree.get("expected", "")).upper()
++        brief = (base / entree["brief"]).read_text(encoding="utf-8")
++        diff = (base / entree["diff"]).read_text(encoding="utf-8")
++
++        verdicts: list[str] = []
++        debut = time.monotonic()
++        for _ in range(nb_runs):
++            verdicts.append(_verdict_appele(juge, brief, diff, cfg))
++        secondes = time.monotonic() - debut
++
++        if attendu == "FAIL":
++            bad_total += 1
++            ok = all(v == "FAIL" for v in verdicts)
++            if ok:
++                detected += 1
++        else:
++            good_total += 1
++            ok = all(v == "PASS" for v in verdicts)
++            if any(v == "FAIL" for v in verdicts):
++                false_positives += 1
++
++        if any(v == "SKIPPED" for v in verdicts):
++            skipped += 1
++
++        cas_resultats.append(
++            {
++                "name": nom,
++                "expected": attendu,
++                "verdicts": verdicts,
++                "ok": ok,
++                "seconds": secondes,
++            }
++        )
++
++    passed = (
++        detected == bad_total
++        and false_positives == 0
++        and skipped == 0
++    )
++
++    return {
++        "cases": cas_resultats,
++        "detected": detected,
++        "bad_total": bad_total,
++        "false_positives": false_positives,
++        "good_total": good_total,
++        "skipped": skipped,
++        "passed": passed,
++        "prompt_sha256": _prompt_sha256(),
++    }
++
++
++def _charger_gate1(path: Path) -> dict[str, Any]:
++    if not path.exists():
++        return {}
++    data = tomllib.loads(path.read_text(encoding="utf-8"))
++    return data.get("gate1", {})
++
++
++def _afficher(resultat: dict[str, Any]) -> None:
++    print(f"{'Cas':<24} {'Attendu':<8} {'Obtenu':<22} Durée")
++    for cas in resultat["cases"]:
++        obtenu = ",".join(cas["verdicts"])
++        print(
++            f"{cas['name']:<24} {cas['expected']:<8} {obtenu:<22} "
++            f"{cas['seconds']:.2f}s"
++        )
++    fiabilite = "JUGE FIABLE" if resultat["passed"] else "JUGE NON FIABLE"
++    print(
++        f"Détectés {resultat['detected']}/{resultat['bad_total']} — "
++        f"faux positifs {resultat['false_positives']}/{resultat['good_total']} — "
++        f"ignorés {resultat['skipped']} — VERDICT : {fiabilite}"
++    )
++
++
++def main(argv: list[str]) -> int:
++    """Entrée CLI `cockpit judge-calibrate` : code 0 seulement si le juge est fiable."""
++    parser = argparse.ArgumentParser(
++        prog="cockpit judge-calibrate",
++        description="Calibre le juge de revue sur un jeu de cas étiquetés.",
++    )
++    parser.add_argument("--runs", type=int, default=1, help="appels du juge par cas")
++    parser.add_argument(
++        "--cases", default=str(DEFAULT_CASES_DIR), help="répertoire des cas"
++    )
++    parser.add_argument("--json", dest="json_path", default=None, help="écrit le rapport JSON")
++    args = parser.parse_args(argv)
++
++    cfg = _charger_gate1(RUNNERS_PATH)
++    resultat = calibrate(args.cases, cfg, runs=args.runs)
++    _afficher(resultat)
++
++    if args.json_path:
++        Path(args.json_path).write_text(
++            json.dumps(resultat, ensure_ascii=False, indent=2) + "\n",
++            encoding="utf-8",
++        )
++
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv[1:]))
+diff --git a/tests/test_judge_calibrate.py b/tests/test_judge_calibrate.py
+new file mode 100644
+index 0000000..46565be
+--- /dev/null
++++ b/tests/test_judge_calibrate.py
+@@ -0,0 +1,218 @@
++#!/usr/bin/env python3
++"""Tests de la calibration du juge (T-027), juge factice injecté, aucun réseau."""
++from __future__ import annotations
++
++import io
++import json
++import sys
++import tempfile
++import unittest
++from contextlib import redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++ROOT = Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(ROOT / "core"))
++
++import judge_calibrate  # noqa: E402
++
++CASES_REELLES = ROOT / "tests" / "judge_cases"
++
++
++def _ecrire_cas(base: Path, specs: list[tuple[str, str]]) -> Path:
++    """Écrit un cases.json temporaire et ses briefs/diffs (diff = nom du cas)."""
++    cas_dir = base / "cas"
++    cas_dir.mkdir(parents=True, exist_ok=True)
++    (cas_dir / "brief.md").write_text("brief de test", encoding="utf-8")
++    entrees = []
++    for nom, attendu in specs:
++        (cas_dir / f"{nom}.diff").write_text(nom, encoding="utf-8")
++        entrees.append(
++            {"name": nom, "brief": "brief.md", "diff": f"{nom}.diff", "expected": attendu}
++        )
++    (cas_dir / "cases.json").write_text(
++        json.dumps(entrees, ensure_ascii=False), encoding="utf-8"
++    )
++    return cas_dir
++
++
++def _juge_par_plan(plan: dict[str, list[str]]):
++    """Juge factice : renvoie les verdicts prévus pour chaque diff (nom du cas)."""
++    appels: dict[str, int] = {}
++
++    def faux_juge(brief: str, diff: str, cfg: dict) -> tuple[str, list[str], dict]:
++        nom = diff.strip()
++        sequence = plan[nom]
++        index = appels.get(nom, 0)
++        verdict = sequence[min(index, len(sequence) - 1)]
++        appels[nom] = index + 1
++        return verdict, [], {}
++
++    return faux_juge
++
++
++def _juge_fixe(verdict: str):
++    def faux_juge(brief: str, diff: str, cfg: dict) -> tuple[str, list[str], dict]:
++        return verdict, [], {}
++
++    return faux_juge
++
++
++class TestCalibrate(unittest.TestCase):
++    """Vérifie le contrat de `core.judge_calibrate.calibrate`."""
++
++    def setUp(self) -> None:
++        self._tmp = tempfile.TemporaryDirectory()
++        self.base = Path(self._tmp.name)
++
++    def tearDown(self) -> None:
++        self._tmp.cleanup()
++
++    def test_juge_parfait_est_fiable(self) -> None:
++        cas_dir = _ecrire_cas(
++            self.base,
++            [
++                ("bon", "PASS"),
++                ("mauvais_1", "FAIL"),
++                ("mauvais_2", "FAIL"),
++            ],
++        )
++        juge = _juge_par_plan(
++            {"bon": ["PASS"], "mauvais_1": ["FAIL"], "mauvais_2": ["FAIL"]}
++        )
++
++        resultat = judge_calibrate.calibrate(cas_dir, {}, judge=juge)
++
++        self.assertTrue(resultat["passed"])
++        self.assertEqual(resultat["detected"], 2)
++        self.assertEqual(resultat["bad_total"], 2)
++        self.assertEqual(resultat["false_positives"], 0)
++        self.assertEqual(resultat["good_total"], 1)
++        self.assertEqual(resultat["skipped"], 0)
++        self.assertEqual([c["name"] for c in resultat["cases"]], ["bon", "mauvais_1", "mauvais_2"])
++        self.assertTrue(all(c["ok"] for c in resultat["cases"]))
++        self.assertEqual(len(resultat["prompt_sha256"]), 64)
++
++    def test_mauvais_diff_juge_pass_nest_pas_detecte(self) -> None:
++        cas_dir = _ecrire_cas(
++            self.base, [("bon", "PASS"), ("mauvais_1", "FAIL"), ("mauvais_2", "FAIL")]
++        )
++        juge = _juge_par_plan(
++            {"bon": ["PASS"], "mauvais_1": ["PASS"], "mauvais_2": ["FAIL"]}
++        )
++
++        resultat = judge_calibrate.calibrate(cas_dir, {}, judge=juge)
++
++        self.assertEqual(resultat["detected"], 1)
++        self.assertEqual(resultat["bad_total"], 2)
++        self.assertLess(resultat["detected"], resultat["bad_total"])
++        self.assertFalse(resultat["passed"])
++        self.assertFalse(next(c for c in resultat["cases"] if c["name"] == "mauvais_1")["ok"])
++
++    def test_bon_diff_juge_fail_est_faux_positif(self) -> None:
++        cas_dir = _ecrire_cas(
++            self.base, [("bon", "PASS"), ("mauvais", "FAIL")]
++        )
++        juge = _juge_par_plan({"bon": ["FAIL"], "mauvais": ["FAIL"]})
++
++        resultat = judge_calibrate.calibrate(cas_dir, {}, judge=juge)
++
++        self.assertEqual(resultat["false_positives"], 1)
++        self.assertEqual(resultat["good_total"], 1)
++        self.assertFalse(resultat["passed"])
++
++    def test_skipped_compte_comme_ratage_sans_faux_positif(self) -> None:
++        cas_dir = _ecrire_cas(self.base, [("bon", "PASS"), ("mauvais", "FAIL")])
++        juge = _juge_par_plan({"bon": ["PASS"], "mauvais": ["SKIPPED"]})
++
++        resultat = judge_calibrate.calibrate(cas_dir, {}, judge=juge)
++
++        self.assertEqual(resultat["skipped"], 1)
++        self.assertEqual(resultat["false_positives"], 0)
++        self.assertEqual(resultat["detected"], 0)
++        self.assertFalse(resultat["passed"])
++        self.assertFalse(next(c for c in resultat["cases"] if c["name"] == "mauvais")["ok"])
++
++    def test_runs_trois_verdict_instable_non_detecte(self) -> None:
++        cas_dir = _ecrire_cas(self.base, [("mauvais", "FAIL")])
++        juge = _juge_par_plan({"mauvais": ["FAIL", "PASS", "FAIL"]})
++
++        resultat = judge_calibrate.calibrate(cas_dir, {}, runs=3, judge=juge)
++
++        cas = resultat["cases"][0]
++        self.assertEqual(cas["verdicts"], ["FAIL", "PASS", "FAIL"])
++        self.assertFalse(cas["ok"])
++        self.assertEqual(resultat["detected"], 0)
++        self.assertFalse(resultat["passed"])
++
++    def test_hachage_change_si_le_prompt_change(self) -> None:
++        cas_dir = _ecrire_cas(self.base, [("bon", "PASS")])
++        prompt = self.base / "sys_judge_claude.md"
++        prompt.write_text("version 1", encoding="utf-8")
++        juge = _juge_par_plan({"bon": ["PASS"]})
++
++        with mock.patch.object(judge_calibrate, "PROMPT_PATH", prompt):
++            h1 = judge_calibrate.calibrate(cas_dir, {}, judge=juge)["prompt_sha256"]
++            prompt.write_text("version 2", encoding="utf-8")
++            h2 = judge_calibrate.calibrate(cas_dir, {}, judge=juge)["prompt_sha256"]
++
++        self.assertNotEqual(h1, h2)
++        self.assertEqual(len(h1), 64)
++
++    def test_main_json_ecrit_le_fichier_et_code_sortie_zero(self) -> None:
++        cas_dir = _ecrire_cas(self.base, [("bon", "PASS"), ("mauvais", "FAIL")])
++        config = self.base / "runners.toml"
++        config.write_text('[gate1]\njudge_model = "haiku"\n', encoding="utf-8")
++        sortie_json = self.base / "resultat.json"
++        juge = _juge_par_plan({"bon": ["PASS"], "mauvais": ["FAIL"]})
++
++        with (
++            mock.patch.object(judge_calibrate, "RUNNERS_PATH", config),
++            mock.patch.object(judge_calibrate.judge_mod, "judge_diff", juge),
++        ):
++            tampon = io.StringIO()
++            with redirect_stdout(tampon):
++                code = judge_calibrate.main(
++                    ["--cases", str(cas_dir), "--json", str(sortie_json)]
++                )
++
++        self.assertEqual(code, 0)
++        self.assertTrue(sortie_json.exists())
++        contenu = json.loads(sortie_json.read_text(encoding="utf-8"))
++        self.assertTrue(contenu["passed"])
++        self.assertIn("JUGE FIABLE", tampon.getvalue())
++        self.assertIn("Détectés 1/1", tampon.getvalue())
++
++    def test_main_non_fiable_code_sortie_un(self) -> None:
++        cas_dir = _ecrire_cas(self.base, [("bon", "PASS"), ("mauvais", "FAIL")])
++        config = self.base / "runners.toml"
++        config.write_text("[gate1]\n", encoding="utf-8")
++        juge = _juge_par_plan({"bon": ["PASS"], "mauvais": ["PASS"]})
++
++        with (
++            mock.patch.object(judge_calibrate, "RUNNERS_PATH", config),
++            mock.patch.object(judge_calibrate.judge_mod, "judge_diff", juge),
++        ):
++            tampon = io.StringIO()
++            with redirect_stdout(tampon):
++                code = judge_calibrate.main(["--cases", str(cas_dir)])
++
++        self.assertEqual(code, 1)
++        self.assertIn("JUGE NON FIABLE", tampon.getvalue())
++
++    def test_jeu_reel_se_charge_et_fichiers_existent(self) -> None:
++        entrees = json.loads((CASES_REELLES / "cases.json").read_text(encoding="utf-8"))
++        self.assertTrue(entrees)
++        for entree in entrees:
++            self.assertTrue((CASES_REELLES / entree["brief"]).is_file(), entree["brief"])
++            self.assertTrue((CASES_REELLES / entree["diff"]).is_file(), entree["diff"])
++
++        resultat = judge_calibrate.calibrate(CASES_REELLES, {}, judge=_juge_fixe("PASS"))
++        self.assertEqual(len(resultat["cases"]), len(entrees))
++        self.assertEqual(resultat["bad_total"], 5)
++        self.assertEqual(resultat["good_total"], 2)
++        self.assertEqual(resultat["prompt_sha256"], judge_calibrate._prompt_sha256())
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -33,7 +33,10 @@ COCKPIT_HOME = Path(os.environ.get("COCKPIT_HOME", CORE.parent))
 sys.path.insert(0, str(CORE))
 
 import costs  # noqa: E402
+import judge  # noqa: E402
+import judge_calibrate  # noqa: E402
 import scheduler  # noqa: E402
+import usage  # noqa: E402
 from context_compiler import compile_ticket_brief  # noqa: E402
 from gatekeeper import (  # noqa: E402
     build_nas_gate1_payload,
@@ -324,7 +327,9 @@ def gate0(ticket: dict[str, Any], proj: dict[str, Any], wt: Path, base: str, tim
 
 
 def gate1(ticket_brief: str, diff: str, cfg: dict[str, Any], timeout: int) -> tuple[str, list[str], dict[str, Any]]:
-    """Audit du diff par le modèle local. Verdicts : PASS | FAIL | SKIPPED (NAS injoignable ou réponse illisible)."""
+    """Audit du diff par le modèle local ou Claude. Verdicts : PASS | FAIL | SKIPPED (NAS injoignable ou réponse illisible)."""
+    if cfg.get("backend") == "claude":
+        return judge.judge_diff(ticket_brief, diff, cfg, int(cfg.get("judge_timeout_s", 120)))
     system = (COCKPIT_HOME / "prompts" / "sys_gate1_nas32k.md").read_text(encoding="utf-8")
     payload = build_nas_gate1_payload(ticket_brief, diff, system, model=cfg.get("model", "Gemma4-ctx:32k"))
     # Sans réflexion, l'audit répond en quelques secondes ; avec, il peut dépasser plusieurs minutes.
@@ -434,10 +439,18 @@ def _post_worker_gates(
     if use_gate1:
         db.update_ticket(project_id, ticket_id, state="GATE1")
         say(f"{ticket_id} : Porte 1 — audit du diff ({len(diff)} caractères) par le modèle local…")
-        gate1_status, gate1_notes, _ = gate1(
+        gate1_status, gate1_notes, info = gate1(
             (wt / BRIEF_NAME).read_text(encoding="utf-8"), diff, cfg.get("gate1", {}),
             int(defaults.get("gate1_timeout_s", 300)),
         )
+        if isinstance(info, dict) and "tokens_in" in info:
+            db.add_event(
+                project_id,
+                ticket_id,
+                "JUDGE",
+                f"{gate1_status} tokens in={info['tokens_in']} out={info['tokens_out']} "
+                f"cache={info['tokens_cache']} équivalent API {float(info.get('cost_usd', 0.0)):.4f} $",
+            )
         say(f"{ticket_id} : Porte 1 {gate1_status}" + (f" — {'; '.join(gate1_notes)[:400]}" if gate1_notes else ""))
     run_fields["gate1"] = gate1_status
     db.record_run(project_id, ticket_id, **run_fields)
@@ -509,15 +522,47 @@ def run_ticket(db: CockpitDB, project_id: str, ticket_id: str, lane_override: st
             say(f"{ticket_id} : tentative {attempt}/{max_attempts} sur la voie {lane} ({runner['argv'][0]})")
 
             extra_env = {k: v.replace("{cockpit}", str(COCKPIT_HOME)) for k, v in runner.get("env", {}).items()}
-            before = costs.snapshot_opencode_stats() if runner.get("cost_source") == "opencode_stats" else None
-            code, duration = run_worker(argv, wt, log_dir / f"attempt-{attempt}.log",
+            log_path = log_dir / f"attempt-{attempt}.log"
+            use_opencode_stats = runner.get("cost_source") == "opencode_stats" and not runner.get("usage_format")
+            before = costs.snapshot_opencode_stats() if use_opencode_stats else None
+            code, duration = run_worker(argv, wt, log_path,
                                         int(runner.get("timeout_s", defaults.get("timeout_s", 900))), extra_env)
             after = costs.snapshot_opencode_stats() if before is not None else None
             say(f"{ticket_id} : worker terminé (code {code}, {duration:.0f}s)")
 
             run_fields: dict[str, Any] = dict(attempt=attempt, lane=lane, provider=runner.get("provider", ""),
                                               exit_code=code, duration_s=round(duration, 1))
-            if before is not None and after is not None:
+            parsed_usage = None
+            if runner.get("usage_format") and log_path.exists():
+                parsed_usage = usage.parse_usage(
+                    str(runner["usage_format"]),
+                    log_path.read_text(encoding="utf-8", errors="replace"),
+                )
+            if parsed_usage is not None:
+                usd_to_eur = float(defaults.get("usd_to_eur", 0.92))
+                raw_usd = parsed_usage["cost_usd"]
+                cost_usd = float(raw_usd) if raw_usd is not None else 0.0
+                cost_kind = str(parsed_usage["cost_kind"])
+                cost_eur = round(cost_usd * usd_to_eur, 4) if cost_kind == "measured" else 0.0
+                run_fields["tokens_in"] = int(parsed_usage["tokens_in"])
+                run_fields["tokens_out"] = int(parsed_usage["tokens_out"])
+                run_fields["tokens_cache"] = int(parsed_usage["tokens_cache"])
+                run_fields["cost_usd"] = cost_usd
+                run_fields["cost_kind"] = cost_kind
+                run_fields["cost_eur"] = cost_eur
+                if cost_eur > 0:
+                    db.update_quota_usage(runner.get("provider", ""), add_spent_eur=cost_eur)
+                if cost_kind == "measured":
+                    cost_msg = f"coût mesuré {cost_eur:.4f} €"
+                elif cost_kind == "api_equivalent":
+                    cost_msg = f"équivalent API {cost_usd:.4f} $ (abonnement, pas de l'argent)"
+                else:
+                    cost_msg = "tokens seulement"
+                say(
+                    f"{ticket_id} : tokens entrée={run_fields['tokens_in']}, "
+                    f"sortie={run_fields['tokens_out']}, cache={run_fields['tokens_cache']} — {cost_msg}"
+                )
+            elif before is not None and after is not None:
                 d = costs.delta(before, after)
                 usd_to_eur = float(defaults.get("usd_to_eur", 0.92))
                 cost_eur = round(d["total_cost_usd"] * usd_to_eur, 4)
@@ -527,7 +572,8 @@ def run_ticket(db: CockpitDB, project_id: str, ticket_id: str, lane_override: st
                 if cost_eur > 0:
                     db.update_quota_usage(runner["provider"], add_spent_eur=cost_eur)
                 say(f"{ticket_id} : coût {cost_eur:.4f} € (tokens in={d['input_tokens']}, out={d['output_tokens']})")
-            elif runner.get("cost_source") == "estimate":
+
+            if runner.get("cost_source") == "estimate":
                 provider = runner.get("provider", "")
                 window_hours = float(runner.get("window_hours", 5.0))
                 recent = db.recent_runs_by_lane(provider, window_hours)
@@ -537,15 +583,16 @@ def run_ticket(db: CockpitDB, project_id: str, ticket_id: str, lane_override: st
                         pct += recent.get(other_lane, 0) * float(other_cfg.get("window_pct_per_run", 0.0))
                 # Le run en cours n'est pas encore enregistré : on l'ajoute à la jauge glissante.
                 pct = min(pct + float(runner.get("window_pct_per_run", 0.0)), 100.0)
-                estimated_cost = float(runner.get("estimated_cost_eur", 0.0))
-                run_fields["tokens_in"] = int(runner.get("estimated_tokens_in", 0))
-                run_fields["tokens_out"] = int(runner.get("estimated_tokens_out", 0))
-                run_fields["cost_eur"] = estimated_cost
                 db.update_quota_usage(provider, window_used_pct=pct)
-                if estimated_cost > 0:
-                    db.update_quota_usage(provider, add_spent_eur=estimated_cost)
-                say(f"{ticket_id} : coût estimé {estimated_cost:.4f} € (estimation, fenêtre {window_hours:g} h"
-                    f" à {pct:.1f} %), tokens in={run_fields['tokens_in']}, out={run_fields['tokens_out']}")
+                if parsed_usage is None:
+                    estimated_cost = float(runner.get("estimated_cost_eur", 0.0))
+                    run_fields["tokens_in"] = int(runner.get("estimated_tokens_in", 0))
+                    run_fields["tokens_out"] = int(runner.get("estimated_tokens_out", 0))
+                    run_fields["cost_eur"] = estimated_cost
+                    if estimated_cost > 0:
+                        db.update_quota_usage(provider, add_spent_eur=estimated_cost)
+                    say(f"{ticket_id} : coût estimé {estimated_cost:.4f} € (estimation, fenêtre {window_hours:g} h"
+                        f" à {pct:.1f} %), tokens in={run_fields['tokens_in']}, out={run_fields['tokens_out']}")
 
             verdict, msg = _post_worker_gates(
                 db, proj, ticket, wt, base, log_dir, cfg, run_fields, artefacts,
@@ -1023,9 +1070,22 @@ def add_note(db: CockpitDB, project_id: str, ticket_id: str, text: str) -> int:
 def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
     projet = args.project
     parent_id = (getattr(args, "parent", "") or "").strip() or None
+    cfg_all = load_runners()
+    if getattr(args, "auto_merge", False) and not getattr(args, "dry_run", False) and not parent_id:
+        gate1_cfg = cfg_all.get("gate1", {})
+        if not getattr(args, "gate1", False) or gate1_cfg.get("backend") != "claude":
+            say("--auto-merge exige --gate1 avec le juge Claude")
+            return 2
+        ok_cal, raison = judge_calibrate.calibration_status()
+        if not ok_cal:
+            say(
+                f"--auto-merge refusé : {raison}. "
+                "Lancez : cockpit judge-calibrate --runs 3 --json logs/judge-calibration.json"
+            )
+            return 2
     done = 0
     escalations_in_a_row = 0
-    runners_cfg = load_runners().get("runners", {})
+    runners_cfg = cfg_all.get("runners", {})
     lane_providers: dict[str, str] = {}
     limits: dict[str, int] = {}
     for lane_name, r_cfg in runners_cfg.items():
@@ -1035,6 +1095,13 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
             lim = int(r_cfg["max_parallel"])
             limits[prov] = min(limits[prov], lim) if prov in limits else lim
     provider_limits: dict[str, int] | None = limits if limits else None
+    max_cost_eur = float(getattr(args, "max_cost_eur", 0.0) or 0.0) or None
+    with db._connect() as conn:
+        run_marker = int(
+            conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM runs WHERE project_id = ?", (projet,)
+            ).fetchone()[0]
+        )
 
     while True:
         slots = min(args.slots, args.max_tickets - done)
@@ -1108,10 +1175,23 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
                         say(str(exc))
                         escalations_in_a_row += 1
 
-        reason = scheduler.should_stop(done, escalations_in_a_row, args.max_tickets, args.max_escalations)
+        with db._connect() as conn:
+            spent_eur = float(
+                conn.execute(
+                    "SELECT COALESCE(SUM(cost_eur), 0) FROM runs WHERE project_id = ? AND id > ?",
+                    (projet, run_marker),
+                ).fetchone()[0]
+            )
+        reason = scheduler.should_stop(
+            done, escalations_in_a_row, args.max_tickets, args.max_escalations,
+            spent_eur=spent_eur, max_cost_eur=max_cost_eur,
+        )
         if reason is not None:
             db.add_event(projet, None, "AUTO_STOP", reason)
-            say(f"Arrêt : {reason}")
+            if reason == "budget":
+                say(f"Arrêt : budget ({spent_eur:.2f} € dépensés)")
+            else:
+                say(f"Arrêt : {reason}")
             return 0
 
 
@@ -1137,6 +1217,7 @@ def main(argv: list[str] | None = None) -> int:
     p_auto.add_argument("--slots", type=int, default=2)
     p_auto.add_argument("--max-tickets", type=int, default=6)
     p_auto.add_argument("--max-escalations", type=int, default=2)
+    p_auto.add_argument("--max-cost-eur", type=float, default=0.0)
     p_auto.add_argument("--max-attempts", type=int, default=2)
     p_auto.add_argument("--gate1", action="store_true")
     p_auto.add_argument("--auto-merge", action="store_true")

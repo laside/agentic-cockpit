@@ -193,6 +193,35 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(should_stop(done=2, escalations_in_a_row=3, max_tickets=6, max_escalations=2), "escalades")
         self.assertIsNone(should_stop(done=5, escalations_in_a_row=1, max_tickets=6, max_escalations=2))
 
+    def test_should_stop_budget(self) -> None:
+        """should_stop renvoie « budget » au seuil, jamais en dessous ni sans limite."""
+        self.assertEqual(
+            should_stop(done=1, escalations_in_a_row=0, spent_eur=0.30, max_cost_eur=0.25), "budget"
+        )
+        self.assertEqual(
+            should_stop(done=1, escalations_in_a_row=0, spent_eur=0.25, max_cost_eur=0.25), "budget"
+        )
+        self.assertIsNone(
+            should_stop(done=1, escalations_in_a_row=0, spent_eur=0.24, max_cost_eur=0.25)
+        )
+        self.assertIsNone(
+            should_stop(done=1, escalations_in_a_row=0, spent_eur=99.0, max_cost_eur=None)
+        )
+        self.assertIsNone(should_stop(done=1, escalations_in_a_row=0))
+
+    def test_should_stop_budget_keeps_other_priorities(self) -> None:
+        """max_tickets et escalades restent prioritaires sur budget."""
+        self.assertEqual(
+            should_stop(done=6, escalations_in_a_row=0, max_tickets=6, max_escalations=2,
+                        spent_eur=10.0, max_cost_eur=0.25),
+            "max_tickets",
+        )
+        self.assertEqual(
+            should_stop(done=2, escalations_in_a_row=2, max_tickets=6, max_escalations=2,
+                        spent_eur=10.0, max_cost_eur=0.25),
+            "escalades",
+        )
+
     def test_normalized_relative_paths_conflict_in_batch_and_locks(self) -> None:
         """(d) « ./shared.py » et « shared.py » ne sont jamais dans le même lot."""
         self.db.set_mistral_key_active(True)

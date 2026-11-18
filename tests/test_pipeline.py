@@ -511,6 +511,258 @@ class PipelineTests(unittest.TestCase):
             ).fetchone()["window_used_pct"]
         self.assertAlmostEqual(pct, 100.0)
 
+    def test_auto_stops_on_budget_after_batch(self) -> None:
+        """cmd_auto s'arrête sur « budget » après le lot quand la dépense atteint --max-cost-eur."""
+        import contextlib
+        import io
+
+        self.db.upsert_ticket("demo", "T-080", "Ticket budget 1", milestone_id="M1", complexity="S",
+                              files_owned=["a.py"])
+        self.db.upsert_ticket("demo", "T-081", "Ticket budget 2", milestone_id="M1", complexity="S",
+                              files_owned=["b.py"])
+
+        def fake_run(db: pmo_db.CockpitDB, project_id: str, ticket_id: str, **_: object) -> int:
+            db.record_run(project_id, ticket_id, attempt=1, lane="fake", provider="local", cost_eur=0.30)
+            db.update_ticket(project_id, ticket_id, state="GATE2")
+            return 0
+
+        orig_run = pipeline.run_ticket
+        buf = io.StringIO()
+        try:
+            pipeline.run_ticket = fake_run  # type: ignore[assignment]
+            with contextlib.redirect_stdout(buf):
+                code = pipeline.main([
+                    "auto", "demo", "--slots", "1", "--max-tickets", "6", "--max-cost-eur", "0.25"
+                ])
+        finally:
+            pipeline.run_ticket = orig_run  # type: ignore[assignment]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.db.get_ticket("demo", "T-080")["state"], "GATE2")
+        self.assertEqual(self.db.get_ticket("demo", "T-081")["state"], "READY")
+        events = [(e["kind"], e["detail"]) for e in self.db.recent_events("demo", 20)]
+        self.assertIn(("AUTO_STOP", "budget"), events)
+        self.assertIn("Arrêt : budget", buf.getvalue())
+        self.assertIn("0.30", buf.getvalue())
+
+    def test_auto_without_max_cost_is_not_bounded_by_budget(self) -> None:
+        """Sans --max-cost-eur, aucune limite de budget n'arrête la boucle."""
+        import contextlib
+        import io
+
+        self.db.upsert_ticket("demo", "T-082", "Ticket sans budget 1", milestone_id="M1", complexity="S",
+                              files_owned=["a.py"])
+        self.db.upsert_ticket("demo", "T-083", "Ticket sans budget 2", milestone_id="M1", complexity="S",
+                              files_owned=["b.py"])
+
+        def fake_run(db: pmo_db.CockpitDB, project_id: str, ticket_id: str, **_: object) -> int:
+            db.record_run(project_id, ticket_id, attempt=1, lane="fake", provider="local", cost_eur=0.30)
+            db.update_ticket(project_id, ticket_id, state="GATE2")
+            return 0
+
+        orig_run = pipeline.run_ticket
+        try:
+            pipeline.run_ticket = fake_run  # type: ignore[assignment]
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = pipeline.main(["auto", "demo", "--slots", "1", "--max-tickets", "6"])
+        finally:
+            pipeline.run_ticket = orig_run  # type: ignore[assignment]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.db.get_ticket("demo", "T-082")["state"], "GATE2")
+        self.assertEqual(self.db.get_ticket("demo", "T-083")["state"], "GATE2")
+        events = [(e["kind"], e["detail"]) for e in self.db.recent_events("demo", 20)]
+        self.assertNotIn(("AUTO_STOP", "budget"), events)
+
+    def test_auto_budget_ignores_runs_before_start(self) -> None:
+        """Seuls les runs créés après le démarrage de la boucle comptent pour le budget."""
+        import contextlib
+        import io
+
+        self.db.record_run("demo", "T-OLD", attempt=1, lane="fake", provider="local", cost_eur=5.0)
+        self.db.upsert_ticket("demo", "T-084", "Ticket budget tardif 1", milestone_id="M1", complexity="S",
+                              files_owned=["a.py"])
+        self.db.upsert_ticket("demo", "T-085", "Ticket budget tardif 2", milestone_id="M1", complexity="S",
+                              files_owned=["b.py"])
+
+        def fake_run(db: pmo_db.CockpitDB, project_id: str, ticket_id: str, **_: object) -> int:
+            db.record_run(project_id, ticket_id, attempt=1, lane="fake", provider="local", cost_eur=0.0)
+            db.update_ticket(project_id, ticket_id, state="GATE2")
+            return 0
+
+        orig_run = pipeline.run_ticket
+        try:
+            pipeline.run_ticket = fake_run  # type: ignore[assignment]
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = pipeline.main([
+                    "auto", "demo", "--slots", "1", "--max-tickets", "6", "--max-cost-eur", "0.25"
+                ])
+        finally:
+            pipeline.run_ticket = orig_run  # type: ignore[assignment]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.db.get_ticket("demo", "T-084")["state"], "GATE2")
+        self.assertEqual(self.db.get_ticket("demo", "T-085")["state"], "GATE2")
+        events = [(e["kind"], e["detail"]) for e in self.db.recent_events("demo", 20)]
+        self.assertNotIn(("AUTO_STOP", "budget"), events)
+
+    def test_usage_format_opencode_json_records_real_tokens_cost_and_updates_quota(self) -> None:
+        """Worker écrivant du JSON opencode_json : runs reçoit tokens/cost_usd/cost_kind/cost_eur et quota_state augmente."""
+        runner = self.runner_cfg["runners"]["deepseek_coder"]
+        runner["provider"] = "deepseek"
+        runner["usage_format"] = "opencode_json"
+        runner["cost_source"] = "opencode_stats"  # ne doit pas être exécuté en double si parse_usage réussit
+        self.db.upsert_ticket("demo", "T-070", "Usage opencode_json", milestone_id="M1", complexity="S", files_owned=["a.py"])
+        json_line = (
+            '{"type": "step_finish", "timestamp": 1794997514199, "sessionID": "ses_x", '
+            '"part": {"type": "step-finish", "reason": "stop", '
+            '"tokens": {"total": 10684, "input": 9018, "output": 2, "reasoning": 0, '
+            '"cache": {"write": 0, "read": 1664}}, "cost": 0.001358892}}'
+        )
+        self.worker(f"echo 'X = 1' > a.py\necho '{json_line}'")
+
+        with self.db._connect() as conn:
+            before_quota = conn.execute(
+                "SELECT monthly_spent_eur, daily_spent_eur FROM quota_state WHERE provider = 'deepseek'"
+            ).fetchone()
+
+        self.assertEqual(
+            pipeline.run_ticket(self.db, "demo", "T-070", lane_override="deepseek_coder", use_gate1=False), 0
+        )
+
+        with self.db._connect() as conn:
+            run_row = conn.execute(
+                "SELECT tokens_in, tokens_out, tokens_cache, cost_usd, cost_kind, cost_eur "
+                "FROM runs WHERE project_id = 'demo' AND ticket_id = 'T-070'"
+            ).fetchone()
+            after_quota = conn.execute(
+                "SELECT monthly_spent_eur, daily_spent_eur FROM quota_state WHERE provider = 'deepseek'"
+            ).fetchone()
+
+        expected_eur = round(0.001358892 * 0.92, 4)
+        self.assertEqual(run_row["tokens_in"], 9018)
+        self.assertEqual(run_row["tokens_out"], 2)
+        self.assertEqual(run_row["tokens_cache"], 1664)
+        self.assertAlmostEqual(run_row["cost_usd"], 0.001358892)
+        self.assertEqual(run_row["cost_kind"], "measured")
+        self.assertAlmostEqual(run_row["cost_eur"], expected_eur)
+        self.assertAlmostEqual(after_quota["monthly_spent_eur"] - before_quota["monthly_spent_eur"], expected_eur)
+        self.assertAlmostEqual(after_quota["daily_spent_eur"] - before_quota["daily_spent_eur"], expected_eur)
+
+    def test_usage_format_claude_json_keeps_cost_eur_zero_and_quota_unchanged(self) -> None:
+        """Worker écrivant du JSON claude_json : cost_usd et tokens enregistrés, mais cost_eur = 0.0 et quota_state inchangé."""
+        self.runner_cfg["runners"]["claude_haiku"] = {
+            "agent": "claude",
+            "provider": "claude",
+            "usage_format": "claude_json",
+            "argv": ["bash", str(self.script), "{prompt}"],
+        }
+        self.db.upsert_ticket("demo", "T-071", "Usage claude_json", milestone_id="M1", complexity="S", files_owned=["a.py"])
+        json_line = (
+            '{"duration_api_ms":605,"stop_reason":"end_turn","total_cost_usd":0.00326982,'
+            '"usage":{"input_tokens":2,"cache_creation_input_tokens":15877,'
+            '"cache_read_input_tokens":9222,"output_tokens":4}}'
+        )
+        self.worker(f"echo 'X = 1' > a.py\necho '{json_line}'")
+
+        with self.db._connect() as conn:
+            before_quota = dict(conn.execute("SELECT * FROM quota_state WHERE provider = 'claude'").fetchone())
+
+        self.assertEqual(
+            pipeline.run_ticket(self.db, "demo", "T-071", lane_override="claude_haiku", use_gate1=False), 0
+        )
+
+        with self.db._connect() as conn:
+            run_row = conn.execute(
+                "SELECT tokens_in, tokens_out, tokens_cache, cost_usd, cost_kind, cost_eur "
+                "FROM runs WHERE project_id = 'demo' AND ticket_id = 'T-071'"
+            ).fetchone()
+            after_quota = dict(conn.execute("SELECT * FROM quota_state WHERE provider = 'claude'").fetchone())
+
+        self.assertEqual(run_row["tokens_in"], 2)
+        self.assertEqual(run_row["tokens_out"], 4)
+        self.assertEqual(run_row["tokens_cache"], 15877 + 9222)
+        self.assertAlmostEqual(run_row["cost_usd"], 0.00326982)
+        self.assertEqual(run_row["cost_kind"], "api_equivalent")
+        self.assertEqual(run_row["cost_eur"], 0.0)
+        self.assertEqual(before_quota, after_quota)
+
+    def test_auto_merge_requires_gate1_claude_and_valid_calibration(self) -> None:
+        """cmd_auto avec --auto-merge exige --gate1 + backend=claude + calibration valide (code 2, rien lancé sinon)."""
+        import contextlib
+        import io
+        from unittest import mock
+
+        self.db.upsert_ticket("demo", "T-090", "Auto merge test", milestone_id="M1", complexity="S", files_owned=["a.py"])
+        called: list[str] = []
+
+        def fake_run(db: pmo_db.CockpitDB, project_id: str, ticket_id: str, **_: object) -> int:
+            called.append(ticket_id)
+            db.update_ticket(project_id, ticket_id, state="GATE2")
+            return 0
+
+        orig_run = pipeline.run_ticket
+        try:
+            pipeline.run_ticket = fake_run  # type: ignore[assignment]
+
+            # 1) Sans --gate1 -> refusé code 2, rien lancé
+            self.runner_cfg["gate1"] = {"backend": "claude"}
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = pipeline.main(["auto", "demo", "--auto-merge"])
+            self.assertEqual(code, 2)
+            self.assertEqual(called, [])
+            self.assertIn("--auto-merge exige --gate1 avec le juge Claude", buf.getvalue())
+
+            # 2) Avec --gate1 mais backend != "claude" -> refusé code 2, rien lancé
+            self.runner_cfg["gate1"] = {"backend": "nas"}
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = pipeline.main(["auto", "demo", "--gate1", "--auto-merge"])
+            self.assertEqual(code, 2)
+            self.assertEqual(called, [])
+            self.assertIn("--auto-merge exige --gate1 avec le juge Claude", buf.getvalue())
+
+            # 3) Avec --gate1 et backend == "claude" mais calibration invalide -> refusé code 2, rien lancé
+            self.runner_cfg["gate1"] = {"backend": "claude"}
+            with mock.patch.object(
+                pipeline.judge_calibrate,
+                "calibration_status",
+                return_value=(False, "aucun rapport de calibration"),
+            ):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    code = pipeline.main(["auto", "demo", "--gate1", "--auto-merge"])
+            self.assertEqual(code, 2)
+            self.assertEqual(called, [])
+            self.assertIn(
+                "--auto-merge refusé : aucun rapport de calibration. "
+                "Lancez : cockpit judge-calibrate --runs 3 --json logs/judge-calibration.json",
+                buf.getvalue(),
+            )
+
+            # 4) --dry-run n'est pas bloqué même avec --auto-merge sans calibration
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = pipeline.main(["auto", "demo", "--auto-merge", "--dry-run"])
+            self.assertEqual(code, 0)
+            self.assertEqual(called, [])
+            self.assertIn("T-090", buf.getvalue())
+
+            # 5) Avec calibration valide, la boucle démarre
+            with mock.patch.object(
+                pipeline.judge_calibrate,
+                "calibration_status",
+                return_value=(True, ""),
+            ):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    code = pipeline.main(["auto", "demo", "--gate1", "--auto-merge", "--max-tickets", "1"])
+            self.assertEqual(code, 0)
+            self.assertEqual(called, ["T-090"])
+        finally:
+            pipeline.run_ticket = orig_run  # type: ignore[assignment]
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

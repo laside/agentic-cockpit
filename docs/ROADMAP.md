@@ -6,9 +6,9 @@
 
 | Jalon | Titre | Statut | Progression | Fusionnés / Total |
 |---|---|---|---|---|
-| **C1** | Pipeline fiable | `ACTIVE` | `██████████` 100.0% | 6 / 6 |
-| **C2** | Coûts et observabilité | `ACTIVE` | `██████████` 100.0% | 6 / 6 |
-| **C3** | Autonomie (ordonnanceur) | `PLANNED` | `██████████` 100.0% | 9 / 9 |
+| **C1** | Pipeline fiable | `ACTIVE` | `██████████` 100.0% | 7 / 7 |
+| **C2** | Coûts et observabilité | `ACTIVE` | `██████████` 100.0% | 8 / 8 |
+| **C3** | Autonomie (ordonnanceur) | `PLANNED` | `██████████` 100.0% | 14 / 14 |
 
 ## 2. File active par Chemin Critique et Priorité
 
