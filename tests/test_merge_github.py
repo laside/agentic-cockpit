@@ -240,12 +240,22 @@ class MergeGithubTests(unittest.TestCase):
         self.assertTrue((self.root / "docs" / "ROADMAP.md").exists())
         self.assertNotEqual(git(self.root, "status", "--porcelain").stdout.strip(), "")
 
-    def test_squash_merge_uses_repo_author_email(self) -> None:
-        git(self.root, "config", "user.email", "bot@users.noreply.github.com")
+    def test_squash_merge_flags_private_commit_email(self) -> None:
+        git(self.root, "config", "user.email", "dev@entreprise-privee.fr")  # privacy-check: allow
         self.prepare_ticket("T-011", "Auteur du squash")
         self.assertEqual(pipeline.merge_ticket(self.db, "demo", "T-011", approve=True), 0)
         merge = next(c for c in self.gh_calls() if c[:2] == ["pr", "merge"])
-        self.assertEqual(merge[merge.index("--author-email") + 1], "bot@users.noreply.github.com")
+        self.assertNotIn("--author-email", merge)  # refusé par GitHub pour une adresse noreply
+        leak = next(e for e in self.db.recent_events("demo", 20) if e["kind"] == "PRIVACY_LEAK")
+        self.assertIn("author-email: email-non-autorise", leak["detail"])
+        self.assertNotIn("entreprise-privee", leak["detail"])
+
+    def test_noreply_commit_email_is_not_flagged(self) -> None:
+        git(self.root, "config", "user.email", "1+bot@users.noreply.github.com")
+        git(self.root, "config", "user.name", "bot")
+        self.prepare_ticket("T-013", "Auteur noreply")
+        self.assertEqual(pipeline.merge_ticket(self.db, "demo", "T-013", approve=True), 0)
+        self.assertNotIn("PRIVACY_LEAK", [e["kind"] for e in self.db.recent_events("demo", 20)])
 
     def test_private_word_in_contract_blocks_push_and_pr(self) -> None:
         (self.overlay / "forbidden-words.txt").write_text("# liste\nmotprive\n", encoding="utf-8")
