@@ -366,6 +366,45 @@ class TestPrivacyCheck(unittest.TestCase):
         self.assertIn("python3 -B -m unittest discover -s tests -p 'test_*.py'", content)
         self.assertIn("python3 scripts/privacy-check.py --generic", content)
 
+    def test_ci_workflow_notify_job_comments_pull_request(self) -> None:
+        """Vérifie le job `notify` de ci.yml en texte brut (sans PyYAML)."""
+        self.assertTrue(CI_WORKFLOW.is_file())
+        content = CI_WORKFLOW.read_text(encoding="utf-8")
+
+        # Le job notify existe et dépend du job tests réussi, sur PR uniquement.
+        self.assertIn("notify:", content)
+        self.assertIn("needs: [tests]", content)
+        self.assertIn("github.event_name == 'pull_request'", content)
+        self.assertIn("needs.tests.result == 'success'", content)
+        self.assertIn("ubuntu-latest", content)
+
+        # Permissions minimales et jeton unique.
+        self.assertIn("pull-requests: write", content)
+        self.assertIn("secrets.GITHUB_TOKEN", content)
+
+        # Commentaire idempotent sur la PR courante.
+        self.assertIn("<!-- cockpit-ci-tests-passed -->", content)
+        self.assertIn("gh pr comment", content)
+        self.assertIn("github.event.pull_request.number", content)
+        self.assertIn("--edit-last", content)
+        self.assertIn("--create-if-none", content)
+
+        # Un échec de commentaire ne casse pas la CI.
+        self.assertIn("continue-on-error: true", content)
+
+    def test_ci_workflow_has_no_hardcoded_secret(self) -> None:
+        """Aucun jeton en clair dans le workflow : seul secrets.GITHUB_TOKEN est utilisé."""
+        content = CI_WORKFLOW.read_text(encoding="utf-8")
+        forbidden = ("ghp_", "github_pat_", "AKIA", "-----BEGIN")
+        for needle in forbidden:
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, content)
+        # Toute référence à secrets.* doit viser GITHUB_TOKEN.
+        for line in content.splitlines():
+            if "secrets." in line:
+                with self.subTest(line=line):
+                    self.assertIn("secrets.GITHUB_TOKEN", line)
+
 
 if __name__ == "__main__":
     unittest.main()

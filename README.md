@@ -138,6 +138,18 @@ La branche `main` reste protégée : le pipeline ne pousse jamais directement de
 régénérée sans être commitée. Côté GitHub, activez la protection de `main` et exigez les checks CI
 avant fusion. En mode `local` (défaut), la fusion se fait en `--no-ff` depuis le dépôt racine.
 
+### Notification CI des pull requests
+
+Lorsqu'une pull request fait passer le job `tests`, un job `notify` poste ou met à jour un commentaire
+sur la PR (notification mobile). Le commentaire porte le marqueur `<!-- cockpit-ci-tests-passed -->`
+et est édité en place (`gh pr comment --edit-last --create-if-none`), donc une seule notification
+subsiste par PR. Le job ne s'exécute que pour `pull_request` et si `tests` réussit ; il utilise
+uniquement le `GITHUB_TOKEN` avec la permission `pull-requests: write`.
+
+Limite des PR venant d'un fork : le `GITHUB_TOKEN` y est en lecture seule et ne peut pas écrire de
+commentaire. Le job `notify` déclare `continue-on-error: true` : cet échec est toléré et ne fait pas
+échouer la CI.
+
 Pour un projet dont `projects.toml` contient `merge_mode = "github_pr"` (PR seule), le push et la
 création (ou réutilisation) de la PR sont identiques au mode `github`, puis le pipeline s'arrête :
 aucun `gh pr checks`, aucun `gh pr merge`. Le ticket passe à l'état `PR_OPEN` (événement `PR_OPENED`
