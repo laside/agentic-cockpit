@@ -123,10 +123,14 @@ def _check_tracked_files(
     if proc.returncode != 0:
         return findings
 
-    for raw_rel in proc.stdout.split(b"\x00"):
-        if not raw_rel:
-            continue
+    paths = [raw_rel for raw_rel in proc.stdout.split(b"\x00") if raw_rel]
+    for index, raw_rel in enumerate(paths, start=1):
         rel_path = raw_rel.decode("utf-8", errors="surrogateescape")
+
+        path_motifs = _check_text_line(rel_path, deny_patterns)
+        for motif in path_motifs:
+            findings.append(f"chemin#{index}: {motif}")
+
         file_path = repo / rel_path
         if not file_path.is_file():
             continue
@@ -141,9 +145,10 @@ def _check_tracked_files(
         except UnicodeDecodeError:
             continue
 
+        display = rel_path if not path_motifs else f"fichier#{index}"
         for lineno, line in enumerate(text.splitlines(), start=1):
             for motif in _check_text_line(line, deny_patterns):
-                findings.append(f"{rel_path}:{lineno}: {motif}")
+                findings.append(f"{display}:{lineno}: {motif}")
 
     return findings
 
