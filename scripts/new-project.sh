@@ -67,7 +67,7 @@ if toml_path.exists():
 PY
 
 mkdir -p "$PROJ_ROOT" "$WT_SESS" "$WT_TICK"
-mkdir -p "$PROJ_ROOT/.agents/board/inbox" "$PROJ_ROOT/.agents/board/status" "$PROJ_ROOT/.nexus/rules"
+mkdir -p "$PROJ_ROOT/.nexus/rules"
 
 HAS_GIT=0
 if command -v git >/dev/null 2>&1; then

@@ -8,7 +8,7 @@
 |---|---|---|---|---|
 | **C1** | Pipeline fiable | `ACTIVE` | `██████████` 100.0% | 6 / 6 |
 | **C2** | Coûts et observabilité | `ACTIVE` | `██████████` 100.0% | 6 / 6 |
-| **C3** | Autonomie (ordonnanceur) | `PLANNED` | `██████████` 100.0% | 3 / 3 |
+| **C3** | Autonomie (ordonnanceur) | `PLANNED` | `██████████` 100.0% | 9 / 9 |
 
 ## 2. File active par Chemin Critique et Priorité
 

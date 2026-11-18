@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 from pmo_db import CockpitDB
@@ -105,15 +106,41 @@ def render_pmo_screen(db: CockpitDB, project_id: str, width: int = 105) -> str:
     lines.append(
         f"{C_DIM}{'ID':<7} {'JALON':<6} {'PRIO':<5} {'TAILLE':<6} {'ÉTAT':<10} {'DÉBLOQUE':<9} {'VOIE RECOMMANDÉE':<20} {'TITRE'}{C_RESET}"
     )
-    for item in queue[:18]:
+    queue_ids = {item["id"] for item in queue}
+    children: dict[str, list[dict[str, Any]]] = {}
+    roots: list[dict[str, Any]] = []
+    for item in queue:
+        parent_id = item.get("parent_id") or ""
+        if parent_id and parent_id in queue_ids:
+            children.setdefault(parent_id, []).append(item)
+        else:
+            roots.append(item)
+
+    def _walk(nodes: list[dict[str, Any]]):
+        for node in nodes:
+            yield node
+            for child in children.get(node["id"], []):
+                yield from _walk([child])
+
+    for item in list(_walk(roots))[:18]:
+        is_child = bool(item.get("parent_id"))
+        marker = "└ " if is_child else "  "
         rec = db.select_optimal_lane(item["complexity"], item["priority"], item["fail_count"])
         lane = item.get("lane") or rec["lane"]
+        if lane == "interactive":
+            lane = "chantier"
         unb = f"+{item['unblocks_count']} aval" if item["unblocks_count"] else "-"
-        title_trunc = item["title"][: max(20, width - 78)]
+        owner = (item.get("owner") or "").strip()
+        suffix = (
+            f" (tenu par {owner})"
+            if owner and item["state"] not in ("READY", "BLOCKED", "MERGED")
+            else ""
+        )
+        title_trunc = item["title"][: max(20, width - 78 - len(suffix))]
         lines.append(
-            f"{C_BOLD}{item['id']:<7}{C_RESET} {str(item['milestone_id'] or '-'):<6} "
+            f"{marker}{C_BOLD}{item['id']:<7}{C_RESET} {str(item['milestone_id'] or '-'):<6} "
             f"{item['priority']:<5} [{item['complexity']:<2}]   {item['state']:<10} "
-            f"{unb:<9} {lane:<20} {title_trunc}"
+            f"{unb:<9} {lane:<20} {title_trunc}{suffix}"
         )
 
     events = db.recent_events(project_id, 5)

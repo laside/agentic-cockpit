@@ -14,6 +14,7 @@ Tout ce qui est déterministe (git, verrous, tests, tri des logs, états) est fa
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import shutil
@@ -40,11 +41,13 @@ from gatekeeper import (  # noqa: E402
     sieve_test_output,
     verify_worktree_scope,
 )
-from pmo_db import CockpitDB  # noqa: E402
+from pmo_db import CockpitDB, normalize_rel_path  # noqa: E402
 
 DB_PATH = Path(os.environ.get("DB_PATH", COCKPIT_HOME / "db" / "cockpit_pmo.db"))
 BRIEF_NAME = ".nexus_brief.md"
 RUNNABLE_STATES = {"READY", "ASSIGNED", "GATE0", "GATE1"}
+ACTIVE_STATES = {"ASSIGNED", "GATE0", "GATE1", "GATE2", "VALIDATED"}
+INTERACTIVE_OWNERS = ("claude", "agy", "deepseek")
 
 
 class PipelineError(Exception):
@@ -120,16 +123,31 @@ def changed_files(wt: Path, base: str) -> list[str]:
 _GIT_WORKTREE_LOCK = threading.Lock()
 
 
-def ensure_worktree(proj: dict[str, Any], ticket_id: str) -> Path:
+def ensure_worktree(proj: dict[str, Any], ticket_id: str, parent_id: str = "") -> Path:
     root = Path(proj["root_path"])
     wt = Path(proj["wt_tickets_dir"]) / ticket_id
     branch = f"feat/{ticket_id}"
+    parent_id = (parent_id or "").strip()
     with _GIT_WORKTREE_LOCK:
         if wt.exists():
             return wt
         wt.parent.mkdir(parents=True, exist_ok=True)
+        if parent_id:
+            parent_branch = f"feat/{parent_id}"
+            has_parent = (
+                sh(["git", "rev-parse", "--verify", "--quiet", parent_branch], root, check=False).returncode == 0
+            )
+            if not has_parent:
+                raise PipelineError(
+                    f"le chantier {parent_id} doit d'abord être pris (cockpit claim) ou exécuté"
+                )
         has_branch = sh(["git", "rev-parse", "--verify", "--quiet", branch], root, check=False).returncode == 0
-        args = ["git", "worktree", "add", str(wt)] + ([branch] if has_branch else ["-b", branch])
+        if has_branch:
+            args = ["git", "worktree", "add", str(wt), branch]
+        elif parent_id:
+            args = ["git", "worktree", "add", "-b", branch, str(wt), f"feat/{parent_id}"]
+        else:
+            args = ["git", "worktree", "add", str(wt), "-b", branch]
         sh(args, root)
         agents = root / ".agents"
         if agents.exists() and not (wt / ".agents").exists():
@@ -144,9 +162,71 @@ def ensure_worktree(proj: dict[str, Any], ticket_id: str) -> Path:
         return wt
 
 
-def write_brief(ticket: dict[str, Any], wt: Path) -> Path:
+def _build_neighbors_section(db: CockpitDB, ticket: dict[str, Any]) -> str:
+    """Construit la section « Travaux voisins » (0 token) ou chaîne vide s'il n'y a aucun voisin."""
+    project_id = str(ticket.get("project_id") or "")
+    cur_id = str(ticket.get("id") or "")
+    cur_parent = (ticket.get("parent_id") or "").strip()
+    cur_readonly = {
+        normalize_rel_path(f)
+        for f in json.loads(ticket.get("readonly_json") or "[]")
+        if normalize_rel_path(f)
+    }
+
+    neighbors: list[dict[str, Any]] = []
+    for cand in db.get_prioritized_queue(project_id):
+        cid = str(cand.get("id") or "")
+        if not cid or cid == cur_id or cand.get("state") not in ACTIVE_STATES:
+            continue
+        cand_parent = (cand.get("parent_id") or "").strip()
+        is_sibling = bool(cur_parent and cand_parent == cur_parent)
+        is_parent = bool(cur_parent and cid == cur_parent)
+        cand_files = [
+            normalize_rel_path(f)
+            for f in json.loads(cand.get("files_owned_json") or "[]")
+            if normalize_rel_path(f)
+        ]
+        touches_readonly = bool(cur_readonly and cur_readonly.intersection(cand_files))
+        if is_sibling or is_parent or touches_readonly:
+            neighbors.append(cand)
+            if len(neighbors) >= 8:
+                break
+
+    if not neighbors:
+        return ""
+
+    lines = ["", "## Travaux voisins (ne pas modifier leurs fichiers)"]
+    for n in neighbors:
+        n_files = [
+            normalize_rel_path(f)
+            for f in json.loads(n.get("files_owned_json") or "[]")
+            if normalize_rel_path(f)
+        ]
+        files_str = ", ".join(n_files[:4]) + (f", +{len(n_files) - 4}" if len(n_files) > 4 else "")
+        owner = n.get("owner") or "auto"
+        title = (n.get("title") or "")[:60]
+        lines.append(f"- {n['id']} {n['state']} {owner} {title} ({files_str})")
+
+    neighbor_ids = [n["id"] for n in neighbors]
+    placeholders = ",".join("?" for _ in neighbor_ids)
+    with db._connect() as conn:
+        note_rows = conn.execute(
+            f"SELECT ticket_id, detail, created_at FROM events "
+            f"WHERE project_id = ? AND kind = 'NOTE' AND ticket_id IN ({placeholders}) "
+            f"ORDER BY id DESC LIMIT 3",
+            [project_id, *neighbor_ids],
+        ).fetchall()
+    for row in reversed(note_rows):
+        lines.append(f"- NOTE {row['ticket_id']} : {(row['detail'] or '')[:200]}")
+
+    return "\n".join(lines) + "\n"
+
+
+def write_brief(ticket: dict[str, Any], wt: Path, db: CockpitDB | None = None) -> Path:
     readonly = json.loads(ticket.get("readonly_json") or "[]")
     brief = compile_ticket_brief(wt, ticket, wt / ".nexus" / "rules", readonly or None)
+    if db is not None:
+        brief += _build_neighbors_section(db, ticket)
     path = wt / BRIEF_NAME
     path.write_text(brief, encoding="utf-8")
     return path
@@ -274,6 +354,110 @@ def gate1(ticket_brief: str, diff: str, cfg: dict[str, Any], timeout: int) -> tu
 # ───────────────────────────── exécution d'un ticket ─────────────────────────────
 
 
+def _post_worker_gates(
+    db: CockpitDB,
+    proj: dict[str, Any],
+    ticket: dict[str, Any],
+    wt: Path,
+    base: str,
+    log_dir: Path,
+    cfg: dict[str, Any],
+    run_fields: dict[str, Any],
+    artefacts: set[str],
+    *,
+    use_gate1: bool = False,
+    allow_gate1_rework: bool = False,
+    worker_failed: bool = False,
+    success_event: str | None = None,
+    keep_assigned_on_fail: bool = False,
+) -> tuple[str, str]:
+    """Partie « après worker » : Porte 0, Porte 1 statique (require_tests), indexation, Porte 1 NAS, commit, GATE2."""
+    project_id = ticket["project_id"]
+    ticket_id = ticket["id"]
+    defaults = cfg.get("defaults", {})
+    files_owned = json.loads(ticket.get("files_owned_json") or "[]")
+    lane = str(run_fields.get("lane", ""))
+    attempt = int(run_fields.get("attempt", 1))
+
+    db.update_ticket(project_id, ticket_id, state="GATE0")
+    g0, g0_feedback, changed = gate0(
+        ticket, proj, wt, base, int(defaults.get("gate_timeout_s", 600)), artefacts
+    )
+    run_fields["gate0"] = g0
+
+    if g0 == "SECRET":
+        db.record_run(project_id, ticket_id, **run_fields)
+        db.update_ticket(project_id, ticket_id, state="GATE2")
+        db.add_event(project_id, ticket_id, "GATE0_SECRET", g0_feedback)
+        say(f"{ticket_id} : ARRÊT — {g0_feedback}. Intervention humaine requise.")
+        return "SECRET", g0_feedback
+    if g0 == "FAIL" and worker_failed and not changed:
+        # Le CLI lui-même a échoué (modèle inconnu, quota, authentification) : ce n'est pas un échec du ticket.
+        run_fields["gate0"] = "WORKER_ERROR"
+        db.record_run(project_id, ticket_id, **run_fields)
+        db.update_ticket(project_id, ticket_id, state="READY")
+        code = run_fields.get("exit_code", 1)
+        db.add_event(project_id, ticket_id, "WORKER_ERROR", f"voie {lane} code {code}")
+        say(f"{ticket_id} : le worker de la voie {lane} a échoué (code {code}) sans rien produire."
+            f" Ticket remis à READY. Journal : {log_dir / f'attempt-{attempt}.log'}")
+        return "WORKER_ERROR", g0_feedback
+    if g0 == "FAIL":
+        db.record_run(project_id, ticket_id, **run_fields)
+        fail_updates: dict[str, Any] = {"fail_count": ticket["fail_count"] + 1}
+        if keep_assigned_on_fail:
+            fail_updates["state"] = "ASSIGNED"
+        db.update_ticket(project_id, ticket_id, **fail_updates)
+        db.add_event(project_id, ticket_id, "GATE0_FAIL", g0_feedback[:300])
+        say(f"{ticket_id} : Porte 0 refusée —\n{g0_feedback}")
+        return "FAIL", g0_feedback
+    say(f"{ticket_id} : Porte 0 OK ({len(changed)} fichier(s) : {', '.join(changed)})")
+
+    # Porte 1 statique (0 token) : un ticket qui touche du code source doit aussi toucher un test.
+    if defaults.get("require_tests", False):
+        ok, msg = check_tests_present(changed, files_owned)
+        if not ok:
+            run_fields["gate1"] = "STATIC_FAIL"
+            db.record_run(project_id, ticket_id, **run_fields)
+            static_updates: dict[str, Any] = {"fail_count": ticket["fail_count"] + 1}
+            if keep_assigned_on_fail:
+                static_updates["state"] = "ASSIGNED"
+            db.update_ticket(project_id, ticket_id, **static_updates)
+            db.add_event(project_id, ticket_id, "GATE1_STATIC_FAIL", msg[:300])
+            say(f"{ticket_id} : Porte 1 statique refusée — {msg}")
+            return "FAIL", msg
+
+    # Indexe uniquement les fichiers du périmètre, puis audite le diff complet depuis la base.
+    sh(["git", "add", "--", *changed], wt)
+    diff = sh(["git", "diff", "--cached", base], wt).stdout
+    gate1_status = "SKIPPED"
+    gate1_notes: list[str] = []
+    if use_gate1:
+        db.update_ticket(project_id, ticket_id, state="GATE1")
+        say(f"{ticket_id} : Porte 1 — audit du diff ({len(diff)} caractères) par le modèle local…")
+        gate1_status, gate1_notes, _ = gate1(
+            (wt / BRIEF_NAME).read_text(encoding="utf-8"), diff, cfg.get("gate1", {}),
+            int(defaults.get("gate1_timeout_s", 300)),
+        )
+        say(f"{ticket_id} : Porte 1 {gate1_status}" + (f" — {'; '.join(gate1_notes)[:400]}" if gate1_notes else ""))
+    run_fields["gate1"] = gate1_status
+    db.record_run(project_id, ticket_id, **run_fields)
+
+    if gate1_status == "FAIL" and allow_gate1_rework:
+        db.add_event(project_id, ticket_id, "GATE1_FAIL", "; ".join(gate1_notes)[:300])
+        return "GATE1_REWORK", "L'audit du diff signale :\n- " + "\n- ".join(gate1_notes)
+
+    # Commit déterministe du travail validé par la Porte 0.
+    if sh(["git", "diff", "--cached", "--quiet"], wt, check=False).returncode != 0:
+        sh(["git", "commit", "-m", f"feat({ticket_id}): {ticket['title'][:72]}"], wt)
+    needs_arch = bool(ticket.get("touches_sensitive")) or gate1_status != "PASS"
+    state = "GATE2" if needs_arch else "VALIDATED"
+    db.update_ticket(project_id, ticket_id, state=state)
+    db.add_event(project_id, ticket_id, success_event or state, f"gate0=PASS gate1={gate1_status} tentative={attempt}")
+    write_report(log_dir, ticket, lane, attempt, changed, gate1_status, gate1_notes, state)
+    say(f"{ticket_id} : {state}" + (" (revue architecte requise)" if needs_arch else " — prêt à fusionner"))
+    return "PASS", ""
+
+
 def run_ticket(db: CockpitDB, project_id: str, ticket_id: str, lane_override: str = "",
                max_attempts: int = 0, use_gate1: bool = True) -> int:
     proj = db.get_project(project_id)
@@ -282,12 +466,126 @@ def run_ticket(db: CockpitDB, project_id: str, ticket_id: str, lane_override: st
         raise PipelineError(f"Projet inconnu : {project_id}")
     if not ticket:
         raise PipelineError(f"Ticket inconnu : {ticket_id} (projet {project_id})")
-    if ticket["state"] not in RUNNABLE_STATES:
-        raise PipelineError(f"{ticket_id} est à l'état {ticket['state']} : exécution refusée.")
+    claimed, reason = db.claim_ticket(project_id, ticket_id, os.getpid())
+    if not claimed:
+        raise PipelineError(f"{ticket_id} ne peut pas être exécuté ({reason}) : exécution refusée.")
 
-    cfg = load_runners()
-    defaults = cfg.get("defaults", {})
-    max_attempts = max_attempts or int(defaults.get("max_attempts", 3))
+    try:
+        cfg = load_runners()
+        defaults = cfg.get("defaults", {})
+        max_attempts = max_attempts or int(defaults.get("max_attempts", 3))
+        files_owned = json.loads(ticket.get("files_owned_json") or "[]")
+        if not files_owned:
+            raise PipelineError(f"{ticket_id} n'a aucun fichier dans files_owned : périmètre non vérifiable.")
+
+        ok, conflicts = db.acquire_locks(project_id, ticket_id, files_owned)
+        if not ok:
+            raise PipelineError("Fichiers déjà verrouillés : " + ", ".join(conflicts))
+
+        parent_id = (ticket.get("parent_id") or "").strip()
+        wt = ensure_worktree(proj, ticket_id, parent_id)
+        brief_path = write_brief(ticket, wt, db)
+        base_ref = f"feat/{parent_id}" if parent_id else proj["default_branch"]
+        base = sh(["git", "merge-base", "HEAD", base_ref], wt).stdout.strip()
+        log_dir = COCKPIT_HOME / "logs" / project_id / ticket_id
+        say(f"{ticket_id} : worktree {wt}, brief {brief_path.stat().st_size} octets, base {base[:7]}")
+
+        feedback = ""
+        artefacts: set[str] = set()
+        gate1_reworks = 0
+        max_reworks = int(cfg.get("gate1", {}).get("max_reworks", 1))
+
+        for attempt in range(1, max_attempts + 1):
+            ticket = db.get_ticket(project_id, ticket_id) or ticket
+            lane = lane_override or db.select_optimal_lane(
+                ticket["complexity"], ticket["priority"], ticket["fail_count"]
+            )["lane"]
+            runner = cfg["runners"].get(lane)
+            if not runner:
+                raise PipelineError(f"Voie '{lane}' absente de config/runners.toml.")
+            argv = [a.replace("{prompt}", worker_prompt(feedback)) for a in runner["argv"]]
+            db.update_ticket(project_id, ticket_id, state="ASSIGNED", owner=runner.get("agent", lane), lane=lane)
+            db.add_event(project_id, ticket_id, "WORKER_START", f"tentative {attempt}/{max_attempts} voie {lane}")
+            say(f"{ticket_id} : tentative {attempt}/{max_attempts} sur la voie {lane} ({runner['argv'][0]})")
+
+            extra_env = {k: v.replace("{cockpit}", str(COCKPIT_HOME)) for k, v in runner.get("env", {}).items()}
+            before = costs.snapshot_opencode_stats() if runner.get("cost_source") == "opencode_stats" else None
+            code, duration = run_worker(argv, wt, log_dir / f"attempt-{attempt}.log",
+                                        int(runner.get("timeout_s", defaults.get("timeout_s", 900))), extra_env)
+            after = costs.snapshot_opencode_stats() if before is not None else None
+            say(f"{ticket_id} : worker terminé (code {code}, {duration:.0f}s)")
+
+            run_fields: dict[str, Any] = dict(attempt=attempt, lane=lane, provider=runner.get("provider", ""),
+                                              exit_code=code, duration_s=round(duration, 1))
+            if before is not None and after is not None:
+                d = costs.delta(before, after)
+                usd_to_eur = float(defaults.get("usd_to_eur", 0.92))
+                cost_eur = round(d["total_cost_usd"] * usd_to_eur, 4)
+                run_fields["tokens_in"] = d["input_tokens"]
+                run_fields["tokens_out"] = d["output_tokens"]
+                run_fields["cost_eur"] = cost_eur
+                if cost_eur > 0:
+                    db.update_quota_usage(runner["provider"], add_spent_eur=cost_eur)
+                say(f"{ticket_id} : coût {cost_eur:.4f} € (tokens in={d['input_tokens']}, out={d['output_tokens']})")
+            elif runner.get("cost_source") == "estimate":
+                provider = runner.get("provider", "")
+                window_hours = float(runner.get("window_hours", 5.0))
+                recent = db.recent_runs_by_lane(provider, window_hours)
+                pct = 0.0
+                for other_lane, other_cfg in cfg["runners"].items():
+                    if other_cfg.get("provider") == provider and other_cfg.get("cost_source") == "estimate":
+                        pct += recent.get(other_lane, 0) * float(other_cfg.get("window_pct_per_run", 0.0))
+                # Le run en cours n'est pas encore enregistré : on l'ajoute à la jauge glissante.
+                pct = min(pct + float(runner.get("window_pct_per_run", 0.0)), 100.0)
+                estimated_cost = float(runner.get("estimated_cost_eur", 0.0))
+                run_fields["tokens_in"] = int(runner.get("estimated_tokens_in", 0))
+                run_fields["tokens_out"] = int(runner.get("estimated_tokens_out", 0))
+                run_fields["cost_eur"] = estimated_cost
+                db.update_quota_usage(provider, window_used_pct=pct)
+                if estimated_cost > 0:
+                    db.update_quota_usage(provider, add_spent_eur=estimated_cost)
+                say(f"{ticket_id} : coût estimé {estimated_cost:.4f} € (estimation, fenêtre {window_hours:g} h"
+                    f" à {pct:.1f} %), tokens in={run_fields['tokens_in']}, out={run_fields['tokens_out']}")
+
+            verdict, msg = _post_worker_gates(
+                db, proj, ticket, wt, base, log_dir, cfg, run_fields, artefacts,
+                use_gate1=use_gate1,
+                allow_gate1_rework=(gate1_reworks < max_reworks and attempt < max_attempts),
+                worker_failed=(code != 0),
+            )
+            if verdict == "SECRET":
+                return 2
+            if verdict == "WORKER_ERROR":
+                return 3
+            if verdict == "FAIL":
+                feedback = msg
+                continue
+            if verdict == "GATE1_REWORK":
+                gate1_reworks += 1
+                feedback = msg
+                continue
+            return 0
+
+        db.update_ticket(project_id, ticket_id, state="GATE2")
+        db.add_event(project_id, ticket_id, "ESCALATED", f"{max_attempts} tentatives sans succès")
+        say(f"{ticket_id} : {max_attempts} tentatives sans succès — escalade (état GATE2). Dernier retour :\n{feedback}")
+        return 1
+    finally:
+        db.unclaim_ticket(project_id, ticket_id)
+
+
+def claim_ticket(db: CockpitDB, project_id: str, ticket_id: str, owner: str) -> int:
+    """Mode chantier interactif : verrouille les fichiers, passe à ASSIGNED (lane=interactive), prépare worktree et brief."""
+    if owner not in INTERACTIVE_OWNERS:
+        raise PipelineError(f"Agent interactif invalide : {owner} (attendu : {', '.join(INTERACTIVE_OWNERS)})")
+    proj = db.get_project(project_id)
+    ticket = db.get_ticket(project_id, ticket_id)
+    if not proj:
+        raise PipelineError(f"Projet inconnu : {project_id}")
+    if not ticket:
+        raise PipelineError(f"Ticket inconnu : {ticket_id} (projet {project_id})")
+    if ticket["state"] != "READY":
+        raise PipelineError(f"{ticket_id} est à l'état {ticket['state']} (attendu : READY) : claim refusé.")
     files_owned = json.loads(ticket.get("files_owned_json") or "[]")
     if not files_owned:
         raise PipelineError(f"{ticket_id} n'a aucun fichier dans files_owned : périmètre non vérifiable.")
@@ -296,145 +594,104 @@ def run_ticket(db: CockpitDB, project_id: str, ticket_id: str, lane_override: st
     if not ok:
         raise PipelineError("Fichiers déjà verrouillés : " + ", ".join(conflicts))
 
-    wt = ensure_worktree(proj, ticket_id)
-    brief_path = write_brief(ticket, wt)
-    base = sh(["git", "merge-base", "HEAD", proj["default_branch"]], wt).stdout.strip()
-    log_dir = COCKPIT_HOME / "logs" / project_id / ticket_id
-    say(f"{ticket_id} : worktree {wt}, brief {brief_path.stat().st_size} octets, base {base[:7]}")
-
-    feedback = ""
-    artefacts: set[str] = set()
-    gate1_reworks = 0
-    gate1_status = "SKIPPED"
-    gate1_notes: list[str] = []
-
-    for attempt in range(1, max_attempts + 1):
-        ticket = db.get_ticket(project_id, ticket_id) or ticket
-        lane = lane_override or db.select_optimal_lane(
-            ticket["complexity"], ticket["priority"], ticket["fail_count"]
-        )["lane"]
-        runner = cfg["runners"].get(lane)
-        if not runner:
-            raise PipelineError(f"Voie '{lane}' absente de config/runners.toml.")
-        argv = [a.replace("{prompt}", worker_prompt(feedback)) for a in runner["argv"]]
-        db.update_ticket(project_id, ticket_id, state="ASSIGNED", owner=runner.get("agent", lane), lane=lane)
-        db.add_event(project_id, ticket_id, "WORKER_START", f"tentative {attempt}/{max_attempts} voie {lane}")
-        say(f"{ticket_id} : tentative {attempt}/{max_attempts} sur la voie {lane} ({runner['argv'][0]})")
-
-        extra_env = {k: v.replace("{cockpit}", str(COCKPIT_HOME)) for k, v in runner.get("env", {}).items()}
-        before = costs.snapshot_opencode_stats() if runner.get("cost_source") == "opencode_stats" else None
-        code, duration = run_worker(argv, wt, log_dir / f"attempt-{attempt}.log",
-                                    int(runner.get("timeout_s", defaults.get("timeout_s", 900))), extra_env)
-        after = costs.snapshot_opencode_stats() if before is not None else None
-        say(f"{ticket_id} : worker terminé (code {code}, {duration:.0f}s)")
-
-        db.update_ticket(project_id, ticket_id, state="GATE0")
-        g0, g0_feedback, changed = gate0(
-            ticket, proj, wt, base, int(defaults.get("gate_timeout_s", 600)), artefacts
+    conn = db._connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE tickets SET state = 'ASSIGNED', owner = ?, lane = 'interactive', "
+            "claimed_pid = NULL, updated_at = CURRENT_TIMESTAMP "
+            "WHERE project_id = ? AND id = ? AND state = 'READY'",
+            (owner, project_id, ticket_id),
         )
-        run_fields: dict[str, Any] = dict(attempt=attempt, lane=lane, provider=runner.get("provider", ""),
-                                          exit_code=code, duration_s=round(duration, 1), gate0=g0)
-        if before is not None and after is not None:
-            d = costs.delta(before, after)
-            usd_to_eur = float(defaults.get("usd_to_eur", 0.92))
-            cost_eur = round(d["total_cost_usd"] * usd_to_eur, 4)
-            run_fields["tokens_in"] = d["input_tokens"]
-            run_fields["tokens_out"] = d["output_tokens"]
-            run_fields["cost_eur"] = cost_eur
-            if cost_eur > 0:
-                db.update_quota_usage(runner["provider"], add_spent_eur=cost_eur)
-            say(f"{ticket_id} : coût {cost_eur:.4f} € (tokens in={d['input_tokens']}, out={d['output_tokens']})")
-        elif runner.get("cost_source") == "estimate":
-            provider = runner.get("provider", "")
-            window_hours = float(runner.get("window_hours", 5.0))
-            recent = db.recent_runs_by_lane(provider, window_hours)
-            pct = 0.0
-            for other_lane, other_cfg in cfg["runners"].items():
-                if other_cfg.get("provider") == provider and other_cfg.get("cost_source") == "estimate":
-                    pct += recent.get(other_lane, 0) * float(other_cfg.get("window_pct_per_run", 0.0))
-            # Le run en cours n'est pas encore enregistré : on l'ajoute à la jauge glissante.
-            pct = min(pct + float(runner.get("window_pct_per_run", 0.0)), 100.0)
-            estimated_cost = float(runner.get("estimated_cost_eur", 0.0))
-            run_fields["tokens_in"] = int(runner.get("estimated_tokens_in", 0))
-            run_fields["tokens_out"] = int(runner.get("estimated_tokens_out", 0))
-            run_fields["cost_eur"] = estimated_cost
-            db.update_quota_usage(provider, window_used_pct=pct)
-            if estimated_cost > 0:
-                db.update_quota_usage(provider, add_spent_eur=estimated_cost)
-            say(f"{ticket_id} : coût estimé {estimated_cost:.4f} € (estimation, fenêtre {window_hours:g} h"
-                f" à {pct:.1f} %), tokens in={run_fields['tokens_in']}, out={run_fields['tokens_out']}")
-        if g0 == "SECRET":
-            db.record_run(project_id, ticket_id, **run_fields)
-            db.update_ticket(project_id, ticket_id, state="GATE2")
-            db.add_event(project_id, ticket_id, "GATE0_SECRET", g0_feedback)
-            say(f"{ticket_id} : ARRÊT — {g0_feedback}. Intervention humaine requise.")
-            return 2
-        if g0 == "FAIL" and code != 0 and not changed:
-            # Le CLI lui-même a échoué (modèle inconnu, quota, authentification) : ce n'est pas un échec du ticket.
-            run_fields["gate0"] = "WORKER_ERROR"
-            db.record_run(project_id, ticket_id, **run_fields)
-            db.update_ticket(project_id, ticket_id, state="READY")
-            db.add_event(project_id, ticket_id, "WORKER_ERROR", f"voie {lane} code {code}")
-            say(f"{ticket_id} : le worker de la voie {lane} a échoué (code {code}) sans rien produire."
-                f" Ticket remis à READY. Journal : {log_dir / f'attempt-{attempt}.log'}")
-            return 3
-        if g0 == "FAIL":
-            db.record_run(project_id, ticket_id, **run_fields)
-            db.update_ticket(project_id, ticket_id, fail_count=ticket["fail_count"] + 1)
-            db.add_event(project_id, ticket_id, "GATE0_FAIL", g0_feedback[:300])
-            say(f"{ticket_id} : Porte 0 refusée —\n{g0_feedback}")
-            feedback = g0_feedback
-            continue
-        say(f"{ticket_id} : Porte 0 OK ({len(changed)} fichier(s) : {', '.join(changed)})")
+        if cur.rowcount != 1:
+            conn.rollback()
+            raise PipelineError(f"{ticket_id} n'est plus à l'état READY : claim refusé.")
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
 
-        # Porte 1 statique (0 token) : un ticket qui touche du code source doit aussi toucher un test.
-        if defaults.get("require_tests", False):
-            ok, msg = check_tests_present(changed, files_owned)
-            if not ok:
-                run_fields["gate1"] = "STATIC_FAIL"
-                db.record_run(project_id, ticket_id, **run_fields)
-                db.update_ticket(project_id, ticket_id, fail_count=ticket["fail_count"] + 1)
-                db.add_event(project_id, ticket_id, "GATE1_STATIC_FAIL", msg[:300])
-                say(f"{ticket_id} : Porte 1 statique refusée — {msg}")
-                feedback = msg
-                continue
+    ticket = db.get_ticket(project_id, ticket_id) or ticket
+    parent_id = (ticket.get("parent_id") or "").strip()
+    wt = ensure_worktree(proj, ticket_id, parent_id)
+    write_brief(ticket, wt, db)
+    db.add_event(project_id, ticket_id, "CLAIMED", f"owner={owner} lane=interactive")
+    say(f"{ticket_id} pris en charge par {owner} — lire {BRIEF_NAME} avant toute modification.")
+    print(f"WORKTREE={wt.resolve()}", flush=True)
+    return 0
 
-        # Indexe uniquement les fichiers du périmètre, puis audite le diff complet depuis la base.
-        sh(["git", "add", "--", *changed], wt)
-        diff = sh(["git", "diff", "--cached", base], wt).stdout
-        if use_gate1:
-            db.update_ticket(project_id, ticket_id, state="GATE1")
-            say(f"{ticket_id} : Porte 1 — audit du diff ({len(diff)} caractères) par le modèle local…")
-            gate1_status, gate1_notes, _ = gate1(
-                brief_path.read_text(encoding="utf-8"), diff, cfg.get("gate1", {}),
-                int(defaults.get("gate1_timeout_s", 300)),
-            )
-            say(f"{ticket_id} : Porte 1 {gate1_status}" + (f" — {'; '.join(gate1_notes)[:400]}" if gate1_notes else ""))
-        run_fields["gate1"] = gate1_status
-        db.record_run(project_id, ticket_id, **run_fields)
 
-        max_reworks = int(cfg.get("gate1", {}).get("max_reworks", 1))
-        if gate1_status == "FAIL" and gate1_reworks < max_reworks and attempt < max_attempts:
-            gate1_reworks += 1
-            db.add_event(project_id, ticket_id, "GATE1_FAIL", "; ".join(gate1_notes)[:300])
-            feedback = "L'audit du diff signale :\n- " + "\n- ".join(gate1_notes)
-            continue
+def submit_ticket(db: CockpitDB, project_id: str, ticket_id: str) -> int:
+    """Soumet le worktree d'un ticket interactif aux portes de qualité (une seule passe, sans worker)."""
+    proj = db.get_project(project_id)
+    ticket = db.get_ticket(project_id, ticket_id)
+    if not proj:
+        raise PipelineError(f"Projet inconnu : {project_id}")
+    if not ticket:
+        raise PipelineError(f"Ticket inconnu : {ticket_id} (projet {project_id})")
+    if ticket["state"] != "ASSIGNED" or ticket.get("lane") != "interactive":
+        raise PipelineError(
+            f"{ticket_id} doit être à l'état ASSIGNED sur la voie 'interactive'"
+            f" (actuel : state={ticket['state']}, lane={ticket.get('lane')!r})."
+        )
+    files_owned = json.loads(ticket.get("files_owned_json") or "[]")
+    if not files_owned:
+        raise PipelineError(f"{ticket_id} n'a aucun fichier dans files_owned : périmètre non vérifiable.")
 
-        # Commit déterministe du travail validé par la Porte 0.
-        if sh(["git", "diff", "--cached", "--quiet"], wt, check=False).returncode != 0:
-            sh(["git", "commit", "-m", f"feat({ticket_id}): {ticket['title'][:72]}"], wt)
-        needs_arch = bool(ticket.get("touches_sensitive")) or gate1_status != "PASS"
-        state = "GATE2" if needs_arch else "VALIDATED"
-        db.update_ticket(project_id, ticket_id, state=state)
-        db.add_event(project_id, ticket_id, state, f"gate0=PASS gate1={gate1_status} tentative={attempt}")
-        write_report(log_dir, ticket, lane, attempt, changed, gate1_status, gate1_notes, state)
-        say(f"{ticket_id} : {state}" + (" (revue architecte requise)" if needs_arch else " — prêt à fusionner"))
-        return 0
+    wt = Path(proj["wt_tickets_dir"]) / ticket_id
+    if not wt.exists():
+        raise PipelineError(f"Worktree introuvable : {wt}")
 
-    db.update_ticket(project_id, ticket_id, state="GATE2")
-    db.add_event(project_id, ticket_id, "ESCALATED", f"{max_attempts} tentatives sans succès")
-    say(f"{ticket_id} : {max_attempts} tentatives sans succès — escalade (état GATE2). Dernier retour :\n{feedback}")
-    return 1
+    cfg = load_runners()
+    parent_id = (ticket.get("parent_id") or "").strip()
+    base_ref = f"feat/{parent_id}" if parent_id else proj["default_branch"]
+    base = sh(["git", "merge-base", "HEAD", base_ref], wt).stdout.strip()
+    log_dir = COCKPIT_HOME / "logs" / project_id / ticket_id
+    attempt = int(ticket.get("fail_count") or 0) + 1
+    run_fields: dict[str, Any] = dict(
+        attempt=attempt,
+        lane="interactive",
+        provider=str(ticket.get("owner") or ""),
+        exit_code=0,
+        duration_s=0.0,
+    )
+    verdict, _ = _post_worker_gates(
+        db, proj, ticket, wt, base, log_dir, cfg, run_fields, set(),
+        use_gate1=False,
+        allow_gate1_rework=False,
+        worker_failed=False,
+        success_event="SUBMITTED",
+        keep_assigned_on_fail=True,
+    )
+    if verdict == "SECRET":
+        return 2
+    if verdict == "FAIL":
+        return 1
+    return 0
+
+
+def release_ticket(db: CockpitDB, project_id: str, ticket_id: str) -> int:
+    """Relâche un ticket interactif ASSIGNED : remet à READY, libère les verrous et conserve le worktree."""
+    proj = db.get_project(project_id)
+    ticket = db.get_ticket(project_id, ticket_id)
+    if not proj:
+        raise PipelineError(f"Projet inconnu : {project_id}")
+    if not ticket:
+        raise PipelineError(f"Ticket inconnu : {ticket_id} (projet {project_id})")
+    if ticket["state"] != "ASSIGNED" or ticket.get("lane") != "interactive":
+        raise PipelineError(
+            f"{ticket_id} doit être à l'état ASSIGNED sur la voie 'interactive'"
+            f" (actuel : state={ticket['state']}, lane={ticket.get('lane')!r})."
+        )
+    db.update_ticket(project_id, ticket_id, state="READY", owner="auto", lane="")
+    db.unclaim_ticket(project_id, ticket_id)
+    db.release_locks(project_id, ticket_id)
+    db.add_event(project_id, ticket_id, "RELEASED", f"rendu par {ticket.get('owner') or 'interactive'}")
+    say(f"{ticket_id} relâché : état READY, verrous libérés (worktree conservé).")
+    return 0
 
 
 def write_report(log_dir: Path, ticket: dict[str, Any], lane: str, attempt: int, changed: list[str],
@@ -456,58 +713,108 @@ def write_report(log_dir: Path, ticket: dict[str, Any], lane: str, attempt: int,
 # ───────────────────────────── fusion ─────────────────────────────
 
 
+def _child_ready_for_integration(db: CockpitDB, project_id: str, ticket: dict[str, Any]) -> bool:
+    state = ticket.get("state")
+    if state == "VALIDATED":
+        return True
+    if state == "GATE2":
+        last = db.last_run(project_id, ticket["id"])
+        return bool(last and last.get("gate0") == "PASS" and last.get("gate1") != "STATIC_FAIL")
+    return False
+
+
 def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool = False) -> int:
     proj = db.get_project(project_id)
     ticket = db.get_ticket(project_id, ticket_id)
     if not proj or not ticket:
         raise PipelineError(f"Projet ou ticket inconnu : {project_id} / {ticket_id}")
-    if ticket["state"] == "GATE2" and not approve:
-        raise PipelineError(f"{ticket_id} attend une revue (GATE2). Relire le diff puis relancer avec --approve.")
-    if ticket["state"] not in ("VALIDATED", "GATE2"):
-        raise PipelineError(f"{ticket_id} est à l'état {ticket['state']} : fusion refusée.")
+
+    unmerged_children = [c["id"] for c in db.children(project_id, ticket_id) if c.get("state") != "MERGED"]
+    if unmerged_children:
+        raise PipelineError(
+            f"{ticket_id} a des sous-tickets non MERGED ({', '.join(unmerged_children)}) : fusion refusée."
+        )
+
+    parent_id = (ticket.get("parent_id") or "").strip()
+    if parent_id:
+        if not _child_ready_for_integration(db, project_id, ticket):
+            raise PipelineError(
+                f"{ticket_id} n'est pas intégrable dans {parent_id} (état {ticket['state']}, Porte 0/1 non validée)."
+            )
+    else:
+        if ticket["state"] == "GATE2" and not approve:
+            raise PipelineError(f"{ticket_id} attend une revue (GATE2). Relire le diff puis relancer avec --approve.")
+        if ticket["state"] not in ("VALIDATED", "GATE2"):
+            raise PipelineError(f"{ticket_id} est à l'état {ticket['state']} : fusion refusée.")
 
     root = Path(proj["root_path"])
     wt = Path(proj["wt_tickets_dir"]) / ticket_id
     branch, default = f"feat/{ticket_id}", proj["default_branch"]
-    if sh(["git", "symbolic-ref", "--short", "HEAD"], root).stdout.strip() != default:
-        raise PipelineError(f"Le dépôt racine doit être sur {default}.")
-    if not wt.exists():
-        raise PipelineError(f"Worktree introuvable : {wt}")
-    if sh(["git", "status", "--porcelain", "--untracked-files=no"], wt).stdout.strip():
-        raise PipelineError(f"{ticket_id} a des modifications non commitées dans son worktree.")
+    target_branch = f"feat/{parent_id}" if parent_id else default
+    target_wt = (Path(proj["wt_tickets_dir"]) / parent_id) if parent_id else root
+    lock_path = root / ".git" / "cockpit-merge.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_path.open("a", encoding="utf-8")
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    try:
+        if parent_id:
+            if not target_wt.exists():
+                raise PipelineError(
+                    f"Worktree du chantier {parent_id} introuvable ({target_wt}) : commiter le chantier d'abord."
+                )
+            if sh(["git", "status", "--porcelain", "--untracked-files=no"], target_wt).stdout.strip():
+                raise PipelineError(
+                    f"Le chantier {parent_id} a des modifications suivies non commitées : commiter le chantier d'abord."
+                )
+        else:
+            if sh(["git", "symbolic-ref", "--short", "HEAD"], root).stdout.strip() != default:
+                raise PipelineError(f"Le dépôt racine doit être sur {default}.")
+        if not wt.exists():
+            raise PipelineError(f"Worktree introuvable : {wt}")
+        if sh(["git", "status", "--porcelain", "--untracked-files=no"], wt).stdout.strip():
+            raise PipelineError(f"{ticket_id} a des modifications non commitées dans son worktree.")
 
-    # Porte d'intégration : on ramène la branche par défaut dans le ticket et on re-teste AVANT de fusionner.
-    res = sh(["git", "merge", "--no-edit", default], wt, check=False)
-    if res.returncode != 0:
-        sh(["git", "merge", "--abort"], wt, check=False)
-        db.add_event(project_id, ticket_id, "MERGE_CONFLICT", res.stdout[-300:])
-        raise PipelineError(f"Conflit entre {branch} et {default} : fusion annulée, rien n'a changé.")
-    lint_cmd, default_test = project_commands(project_id, root, wt)
-    timeout = int(load_runners().get("defaults", {}).get("gate_timeout_s", 600))
-    for label, cmd in (("lint", lint_cmd), ("tests", default_test), ("test du ticket", ticket.get("test_cmd") or "")):
-        if not cmd:
-            continue
-        code, out = run_shell(cmd, wt, timeout)
-        if code != 0:
-            db.add_event(project_id, ticket_id, "INTEGRATION_FAIL", f"{label}: {cmd}")
-            raise PipelineError(f"Porte d'intégration refusée ({label}, `{cmd}`) :\n{sieve_test_output(out, 25)}")
-    say(f"{ticket_id} : porte d'intégration OK ({default} intégré, lint et tests verts)")
+        # Porte d'intégration : on ramène la branche cible dans le ticket et on re-teste AVANT de fusionner.
+        res = sh(["git", "merge", "--no-edit", target_branch], wt, check=False)
+        if res.returncode != 0:
+            sh(["git", "merge", "--abort"], wt, check=False)
+            db.add_event(project_id, ticket_id, "MERGE_CONFLICT", res.stdout[-300:])
+            raise PipelineError(f"Conflit entre {branch} et {target_branch} : fusion annulée, rien n'a changé.")
+        lint_cmd, default_test = project_commands(project_id, root, wt)
+        timeout = int(load_runners().get("defaults", {}).get("gate_timeout_s", 600))
+        for label, cmd in (("lint", lint_cmd), ("tests", default_test), ("test du ticket", ticket.get("test_cmd") or "")):
+            if not cmd:
+                continue
+            code, out = run_shell(cmd, wt, timeout)
+            if code != 0:
+                db.add_event(project_id, ticket_id, "INTEGRATION_FAIL", f"{label}: {cmd}")
+                raise PipelineError(f"Porte d'intégration refusée ({label}, `{cmd}`) :\n{sieve_test_output(out, 25)}")
+        say(f"{ticket_id} : porte d'intégration OK ({target_branch} intégré, lint et tests verts)")
 
-    sh(["git", "merge", "--no-ff", branch, "-m", f"merge({ticket_id}): {ticket['title'][:72]}"], root)
-    sh(["git", "worktree", "remove", "--force", str(wt)], root, check=False)
-    sh(["git", "branch", "-D", branch], root, check=False)
-    unblocked = db.complete_and_merge_ticket(project_id, ticket_id)
-    db.add_event(project_id, ticket_id, "MERGED", "débloque : " + (", ".join(unblocked) or "rien"))
+        sh(["git", "merge", "--no-ff", branch, "-m", f"merge({ticket_id}): {ticket['title'][:72]}"], target_wt)
+        sh(["git", "worktree", "remove", "--force", str(wt)], root, check=False)
+        sh(["git", "branch", "-D", branch], root, check=False)
+        unblocked = db.complete_and_merge_ticket(project_id, ticket_id)
+        if parent_id:
+            db.add_event(project_id, ticket_id, "MERGED", f"intégré dans {parent_id}")
+            say(f"{ticket_id} : intégré dans {parent_id}")
+            return 0
+        db.add_event(project_id, ticket_id, "MERGED", "débloque : " + (", ".join(unblocked) or "rien"))
 
-    roadmap = root / "docs" / "ROADMAP.md"
-    db.export_markdown_roadmap(project_id, roadmap)
-    sh(["git", "add", "--", "docs/ROADMAP.md"], root, check=False)
-    if sh(["git", "diff", "--cached", "--quiet"], root, check=False).returncode != 0:
-        env = dict(os.environ, ALLOW_MAIN="1")
-        subprocess.run(["git", "commit", "-q", "-m", f"docs(roadmap): après fusion de {ticket_id}", "--", "docs/ROADMAP.md"],
-                       cwd=str(root), env=env, capture_output=True, text=True)
-    say(f"{ticket_id} : fusionné dans {default}. Débloqués : {', '.join(unblocked) or 'aucun'}")
-    return 0
+        roadmap = root / "docs" / "ROADMAP.md"
+        db.export_markdown_roadmap(project_id, roadmap)
+        sh(["git", "add", "--", "docs/ROADMAP.md"], root, check=False)
+        if sh(["git", "diff", "--cached", "--quiet"], root, check=False).returncode != 0:
+            env = dict(os.environ, ALLOW_MAIN="1")
+            subprocess.run(["git", "commit", "-q", "-m", f"docs(roadmap): après fusion de {ticket_id}", "--", "docs/ROADMAP.md"],
+                           cwd=str(root), env=env, capture_output=True, text=True)
+        say(f"{ticket_id} : fusionné dans {default}. Débloqués : {', '.join(unblocked) or 'aucun'}")
+        return 0
+    finally:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
 
 
 # ───────────────────────────── tickets & vues ─────────────────────────────
@@ -520,11 +827,35 @@ def next_ticket_id(db: CockpitDB, project_id: str) -> str:
     return f"T-{(max(nums) + 1) if nums else 1:03d}"
 
 
+def _format_ticket_line(db: CockpitDB, t: dict[str, Any], indent: str = "") -> str:
+    lane = t.get("lane") or db.select_optimal_lane(t["complexity"], t["priority"], t["fail_count"])["lane"]
+    return (
+        f"{indent}{t['id']:<7} {t['milestone_id'] or '-':<5} {t['priority']:<3} [{t['complexity']:<2}] "
+        f"{t['state']:<10} {lane:<16} {t['title'][:70]}"
+    )
+
+
 def cmd_ticket(db: CockpitDB, args: argparse.Namespace) -> int:
     if args.action == "add":
         if not db.get_project(args.project):
             raise PipelineError(f"Projet inconnu : {args.project}")
         tid = args.id or next_ticket_id(db, args.project)
+        parent_id = (getattr(args, "parent", "") or "").strip()
+        if parent_id:
+            try:
+                runners_cfg = load_runners()
+            except PipelineError:
+                runners_cfg = {}
+            max_children = int(runners_cfg.get("defaults", {}).get("max_children", 4))
+            active_children = [
+                c
+                for c in db.children(args.project, parent_id)
+                if c.get("state") != "MERGED" and c.get("id") != tid
+            ]
+            if len(active_children) >= max_children:
+                raise PipelineError(
+                    f"Le ticket parent {parent_id} a déjà {len(active_children)} sous-tickets non MERGED (limite max_children={max_children})."
+                )
         contract = args.contract or ""
         if args.contract_file:
             contract = Path(args.contract_file).read_text(encoding="utf-8")
@@ -535,6 +866,7 @@ def cmd_ticket(db: CockpitDB, args: argparse.Namespace) -> int:
             depends_on=[d for d in (args.depends or "").split(",") if d],
             acceptance=args.accept or [], contract=contract, test_cmd=args.test_cmd or "",
             touches_sensitive=args.sensitive,
+            parent_id=parent_id,
         )
         t = db.get_ticket(args.project, tid) or {}
         say(f"{tid} créé ({t.get('state')}) dans {args.project}")
@@ -543,12 +875,28 @@ def cmd_ticket(db: CockpitDB, args: argparse.Namespace) -> int:
         t = db.get_ticket(args.project, args.id)
         if not t:
             raise PipelineError(f"Ticket inconnu : {args.id}")
-        print(json.dumps(t, ensure_ascii=False, indent=2))
+        out = dict(t)
+        if not out.get("parent_id"):
+            out.pop("parent_id", None)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
-    for t in db.get_prioritized_queue(args.project):
-        lane = t.get("lane") or db.select_optimal_lane(t["complexity"], t["priority"], t["fail_count"])["lane"]
-        print(f"{t['id']:<7} {t['milestone_id'] or '-':<5} {t['priority']:<3} [{t['complexity']:<2}] "
-              f"{t['state']:<10} {lane:<16} {t['title'][:70]}")
+    queue = db.get_prioritized_queue(args.project)
+    children_by_parent: dict[str, list[dict[str, Any]]] = {}
+    for t in queue:
+        pid = (t.get("parent_id") or "").strip()
+        if pid:
+            children_by_parent.setdefault(pid, []).append(t)
+    top_ids = {t["id"] for t in queue if not (t.get("parent_id") or "").strip()}
+    for t in queue:
+        if (t.get("parent_id") or "").strip():
+            continue
+        print(_format_ticket_line(db, t))
+        for child in children_by_parent.get(t["id"], []):
+            print(_format_ticket_line(db, child, indent="  "))
+    for pid, orphans in children_by_parent.items():
+        if pid not in top_ids:
+            for child in orphans:
+                print(_format_ticket_line(db, child, indent="  "))
     return 0
 
 
@@ -558,13 +906,150 @@ def cmd_events(db: CockpitDB, project_id: str, limit: int) -> int:
     return 0
 
 
+def _format_status_ticket(t: dict[str, Any], indent: str = "") -> str:
+    owner = t.get("owner") or "auto"
+    lane = t.get("lane") or "-"
+    title = (t.get("title") or "")[:50]
+    return f"{indent}{t['id']} {t['state']} {owner} {lane} {title}"
+
+
+def build_status(db: CockpitDB, project_id: str, max_events: int = 8) -> str:
+    """État synthétique du projet en texte brut (<= 40 lignes, 0 token, sections vides omises)."""
+    queue = db.get_prioritized_queue(project_id)
+
+    active = [t for t in queue if t.get("state") in ACTIVE_STATES]
+    children_by_parent: dict[str, list[dict[str, Any]]] = {}
+    for t in active:
+        pid = (t.get("parent_id") or "").strip()
+        if pid:
+            children_by_parent.setdefault(pid, []).append(t)
+
+    work_lines: list[str] = []
+    top_active_ids = {t["id"] for t in active if not (t.get("parent_id") or "").strip()}
+    for t in active:
+        if (t.get("parent_id") or "").strip():
+            continue
+        work_lines.append(_format_status_ticket(t))
+        for child in children_by_parent.get(t["id"], []):
+            work_lines.append(_format_status_ticket(child, indent="  "))
+    for pid, orphans in children_by_parent.items():
+        if pid not in top_active_ids:
+            for child in orphans:
+                work_lines.append(_format_status_ticket(child, indent="  "))
+
+    with db._connect() as conn:
+        lock_rows = conn.execute(
+            "SELECT ticket_id, file_path FROM file_locks WHERE project_id = ? ORDER BY ticket_id, file_path",
+            (project_id,),
+        ).fetchall()
+    locks_by_ticket: dict[str, list[str]] = {}
+    for row in lock_rows:
+        locks_by_ticket.setdefault(row["ticket_id"], []).append(row["file_path"])
+    lock_lines: list[str] = []
+    for tid, files in locks_by_ticket.items():
+        if len(files) <= 6:
+            lock_lines.append(f"{tid} : {', '.join(files)}")
+        else:
+            lock_lines.append(f"{tid} : {', '.join(files[:6])}, +{len(files) - 6}")
+
+    ready_ids = [t["id"] for t in queue if t.get("state") == "READY"]
+
+    ev_limit = max(0, min(int(max_events), 8))
+    events = db.recent_events(project_id, limit=ev_limit) if ev_limit > 0 else []
+    event_lines: list[str] = []
+    for e in events:
+        ts = str(e.get("created_at") or "")
+        hhmm = ts[11:16] if len(ts) >= 16 else (ts[:5] or "00:00")
+        tid = e.get("ticket_id") or "-"
+        kind = e.get("kind") or ""
+        detail = str(e.get("detail") or "").replace("\n", " ")[:60]
+        event_lines.append(f"{hhmm} {tid} {kind} {detail}".rstrip())
+
+    if not work_lines and not lock_lines and not ready_ids and not event_lines:
+        return "Aucune activité."
+
+    def _cap(items: list[str], budget: int) -> list[str]:
+        if len(items) <= budget:
+            return items
+        if budget <= 1:
+            return [f"... +{len(items)} autres"]
+        kept = budget - 1
+        return items[:kept] + [f"... +{len(items) - kept} autres"]
+
+    fixed_lines = (2 if ready_ids else 0) + ((1 + len(event_lines)) if event_lines else 0)
+    rem = max(4, 40 - fixed_lines)
+
+    if work_lines and lock_lines:
+        avail = max(2, rem - 2)
+        if len(work_lines) + len(lock_lines) > avail:
+            lock_budget = min(len(lock_lines), max(3, avail // 3))
+            work_budget = max(1, avail - lock_budget)
+            work_lines = _cap(work_lines, work_budget)
+            lock_lines = _cap(lock_lines, lock_budget)
+    elif work_lines:
+        work_lines = _cap(work_lines, max(1, rem - 1))
+    elif lock_lines:
+        lock_lines = _cap(lock_lines, max(1, rem - 1))
+
+    out_lines: list[str] = []
+    if work_lines:
+        out_lines.append("TRAVAUX EN COURS")
+        out_lines.extend(work_lines)
+    if lock_lines:
+        out_lines.append("FICHIERS VERROUILLÉS")
+        out_lines.extend(lock_lines)
+    if ready_ids:
+        out_lines.append("PRÊTS")
+        out_lines.append(", ".join(ready_ids))
+    if event_lines:
+        out_lines.append("DERNIERS ÉVÉNEMENTS")
+        out_lines.extend(event_lines)
+
+    return "\n".join(out_lines[:40])
+
+
+def add_note(db: CockpitDB, project_id: str, ticket_id: str, text: str) -> int:
+    """Enregistre une note inter-agents sur un ticket (0 token)."""
+    clean = (text or "").strip()
+    if not clean:
+        raise PipelineError("Texte de note vide refusé.")
+    if not db.get_ticket(project_id, ticket_id):
+        raise PipelineError(f"Ticket inconnu : {ticket_id} (projet {project_id})")
+    db.add_event(project_id, ticket_id, "NOTE", clean[:200])
+    say(f"Note enregistrée sur {ticket_id} ({project_id})")
+    return 0
+
+
 def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
     projet = args.project
+    parent_id = (getattr(args, "parent", "") or "").strip() or None
     done = 0
     escalations_in_a_row = 0
+    runners_cfg = load_runners().get("runners", {})
+    lane_providers: dict[str, str] = {}
+    limits: dict[str, int] = {}
+    for lane_name, r_cfg in runners_cfg.items():
+        prov = str(r_cfg.get("provider") or lane_name)
+        lane_providers[lane_name] = prov
+        if "max_parallel" in r_cfg and r_cfg["max_parallel"] is not None:
+            lim = int(r_cfg["max_parallel"])
+            limits[prov] = min(limits[prov], lim) if prov in limits else lim
+    provider_limits: dict[str, int] | None = limits if limits else None
+
     while True:
         slots = min(args.slots, args.max_tickets - done)
-        batch = scheduler.plan_batch(db, projet, slots)
+        plan_kwargs: dict[str, Any] = {
+            "provider_limits": provider_limits,
+            "lane_providers": lane_providers if provider_limits is not None else None,
+        }
+        if parent_id is not None:
+            plan_kwargs["parent_id"] = parent_id
+        batch = scheduler.plan_batch(
+            db,
+            projet,
+            slots,
+            **plan_kwargs,
+        )
         if not batch:
             say("Plus de ticket exécutable")
             return 0
@@ -609,7 +1094,14 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
         if args.auto_merge:
             for item in batch:
                 t_info = db.get_ticket(projet, item["id"])
-                if t_info and t_info.get("state") == "VALIDATED":
+                if not t_info:
+                    continue
+                can_merge = (
+                    _child_ready_for_integration(db, projet, t_info)
+                    if parent_id
+                    else t_info.get("state") == "VALIDATED"
+                )
+                if can_merge:
                     try:
                         merge_ticket(db, projet, item["id"], approve=False)
                     except PipelineError as exc:
@@ -649,6 +1141,7 @@ def main(argv: list[str] | None = None) -> int:
     p_auto.add_argument("--gate1", action="store_true")
     p_auto.add_argument("--auto-merge", action="store_true")
     p_auto.add_argument("--dry-run", action="store_true")
+    p_auto.add_argument("--parent", default="")
 
     p_ticket = sub.add_parser("ticket", help="Gestion des tickets (0 token)")
     p_ticket.add_argument("action", choices=["add", "list", "show"])
@@ -666,10 +1159,32 @@ def main(argv: list[str] | None = None) -> int:
     p_ticket.add_argument("--contract-file", default="")
     p_ticket.add_argument("--test-cmd", default="")
     p_ticket.add_argument("--sensitive", action="store_true")
+    p_ticket.add_argument("--parent", default="")
 
     p_events = sub.add_parser("events", help="Derniers événements du pipeline")
     p_events.add_argument("project", nargs="?", default=default_project)
     p_events.add_argument("--limit", type=int, default=15)
+
+    p_claim = sub.add_parser("claim", help="Prend un ticket en mode chantier interactif")
+    p_claim.add_argument("ticket")
+    p_claim.add_argument("project", nargs="?", default=default_project)
+    p_claim.add_argument("--as", dest="owner", required=True, choices=list(INTERACTIVE_OWNERS))
+
+    p_submit = sub.add_parser("submit", help="Soumet le worktree d'un ticket interactif aux portes")
+    p_submit.add_argument("ticket")
+    p_submit.add_argument("project", nargs="?", default=default_project)
+
+    p_release = sub.add_parser("release", help="Relâche un ticket interactif vers READY")
+    p_release.add_argument("ticket")
+    p_release.add_argument("project", nargs="?", default=default_project)
+
+    p_status = sub.add_parser("status", help="État synthétique du projet (0 token)")
+    p_status.add_argument("project", nargs="?", default=default_project)
+
+    p_note = sub.add_parser("note", help="Enregistre une note utile aux autres agents (0 token)")
+    p_note.add_argument("ticket")
+    p_note.add_argument("project", nargs="?", default=default_project)
+    p_note.add_argument("text", nargs="?", default="")
 
     args = parser.parse_args(argv)
     db = CockpitDB(DB_PATH)
@@ -686,6 +1201,27 @@ def main(argv: list[str] | None = None) -> int:
             if not args.project:
                 raise PipelineError("Projet manquant : cockpit auto <projet>")
             return cmd_auto(db, args)
+        if args.cmd == "claim":
+            if not args.project:
+                raise PipelineError("Projet manquant : cockpit claim T-xxx <projet> --as <nom>")
+            return claim_ticket(db, args.project, args.ticket, args.owner)
+        if args.cmd == "submit":
+            if not args.project:
+                raise PipelineError("Projet manquant : cockpit submit T-xxx <projet>")
+            return submit_ticket(db, args.project, args.ticket)
+        if args.cmd == "release":
+            if not args.project:
+                raise PipelineError("Projet manquant : cockpit release T-xxx <projet>")
+            return release_ticket(db, args.project, args.ticket)
+        if args.cmd == "status":
+            if not args.project:
+                raise PipelineError("Projet manquant : cockpit status <projet>")
+            print(build_status(db, args.project))
+            return 0
+        if args.cmd == "note":
+            if not args.project:
+                raise PipelineError("Projet manquant : cockpit note T-xxx <projet> \"texte\"")
+            return add_note(db, args.project, args.ticket, args.text)
         if args.cmd == "ticket":
             if args.action == "add" and not args.title:
                 raise PipelineError("Titre manquant : cockpit ticket add <projet> \"titre\" --files a,b")

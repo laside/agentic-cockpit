@@ -155,7 +155,9 @@ class TestAgenticCockpitV2(unittest.TestCase):
         self.assertIn("OK : Nouveau projet 'kalipso' initialisé", res.stdout)
         self.assertTrue((proj_dir / "AGENTS.md").exists())
         self.assertTrue((proj_dir / "docs/ROADMAP.md").exists())
-        self.assertTrue((proj_dir / ".agents/board/inbox").is_dir())
+        self.assertFalse((proj_dir / ".agents/board/inbox").exists())
+        agents_md = (proj_dir / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("cockpit status", agents_md)
         self.assertTrue((self.tmp_path / "projets/kalipso-worktrees/wt-claude").is_dir())
 
         # 1. Aucun ticket T-001 parasite dans la base temporaire pour le projet

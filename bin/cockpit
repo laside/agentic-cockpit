@@ -12,7 +12,7 @@ case "$CMD" in
     source "$COCKPIT_HOME/scripts/cockpit-env.sh"
     SESSION="cockpit-$PROJECT"
     LAYOUT_DIR="$HOME/.cache/agentic-cockpit/layouts"
-    mkdir -p "$LAYOUT_DIR" "$PROJECT_ROOT/.agents/board/inbox" "$PROJECT_ROOT/.agents/board/status"
+    mkdir -p "$LAYOUT_DIR"
     LAYOUT_FILE="$LAYOUT_DIR/$SESSION.kdl"
     sed -e "s|__PROJECT_ID__|$PROJECT|g" \
         -e "s|__PROJECT_NAME__|$PROJECT_NAME|g" \
@@ -63,7 +63,7 @@ PY
   relaunch)
     exec bash "$COCKPIT_HOME/scripts/relaunch.sh" "$@"
     ;;
-  run|merge|ticket|events|auto)
+  run|merge|ticket|events|auto|claim|submit|release|status|note)
     exec python3 "$COCKPIT_HOME/core/pipeline.py" "$CMD" "$@"
     ;;
   roadmap)
@@ -71,7 +71,7 @@ PY
     python3 "$COCKPIT_HOME/tui/pmo_dashboard.py" --project "$PROJ" --db "$DB_PATH" --once
     ;;
   *)
-    echo "Usage: cockpit {open|switch|new-project|secret|roadmap|ticket|run|auto|dispatch|merge|events|relaunch}" >&2
+    echo "Usage: cockpit {open|switch|new-project|secret|roadmap|ticket|run|auto|claim|submit|release|status|note|dispatch|merge|events|relaunch}" >&2
     exit 1
     ;;
 esac

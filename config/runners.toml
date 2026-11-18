@@ -22,6 +22,8 @@ argv = ["opencode", "run", "--model", "deepseek/deepseek-flash", "{prompt}"]
 [runners.agy_standard]
 agent = "agy"
 provider = "agy"
+# une seule session agy headless à la fois tant que la cohabitation n'est pas mesurée
+max_parallel = 1
 cost_source = "estimate"
 # valeurs à calibrer : estimation forfaitaire par run, pas une mesure
 window_pct_per_run = 4.0
@@ -34,6 +36,8 @@ argv = ["agy", "--print", "{prompt}", "--mode", "accept-edits"]
 [runners.agy_argon]
 agent = "agy"
 provider = "agy"
+# une seule session agy headless à la fois tant que la cohabitation n'est pas mesurée
+max_parallel = 1
 cost_source = "estimate"
 # valeurs à calibrer : estimation forfaitaire par run, pas une mesure
 window_pct_per_run = 12.0
@@ -48,6 +52,20 @@ argv = ["agy", "--model", "Gemini 4 Argon (High)", "--print", "{prompt}", "--mod
 agent = "mistral"
 provider = "mistral"
 argv = ["vibe", "--prompt", "{prompt}", "--max-turns", "12"]
+
+# Claude en headless (abonnement Claude : à réserver aux sous-tickets où il apporte quelque chose).
+# Jamais choisi par le Gouverneur : `cockpit run T-xxx <projet> --lane claude_haiku`.
+[runners.claude_haiku]
+agent = "claude"
+provider = "claude"
+max_parallel = 2
+argv = ["claude", "-p", "{prompt}", "--model", "haiku", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Glob,Grep,Bash(python3:*),Bash(make:*)"]
+
+[runners.claude_sonnet]
+agent = "claude"
+provider = "claude"
+max_parallel = 2
+argv = ["claude", "-p", "{prompt}", "--model", "sonnet", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Glob,Grep,Bash(python3:*),Bash(make:*)"]
 
 # RTX 3070 (Ollama local, 0 €) : worker validé le 2026-11-18 avec qwen3:8b (80 s, Porte 0 verte).
 # qwen2.5-coder:7b est écarté : il écrit l'appel d'outil en texte JSON au lieu de l'exécuter.

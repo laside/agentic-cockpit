@@ -121,6 +121,52 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("4. COÛTS ET RUNS DU JOUR", out)
         self.assertNotIn("deepseek", out)
 
+    def test_sous_ticket_affiche_sous_son_parent(self) -> None:
+        self.db.upsert_ticket(
+            "demo", "T-P", "Parent du chantier", milestone_id="M1",
+            priority="P0", complexity="S",
+        )
+        self.db.upsert_ticket(
+            "demo", "T-C", "Sous-ticket délégué", milestone_id="M1",
+            priority="P3", complexity="S", parent_id="T-P",
+        )
+
+        out = strip_ansi(pmo_dashboard.render_pmo_screen(self.db, "demo", width=105))
+        lignes = [
+            ligne for ligne in out.splitlines()
+            if " T-P " in ligne or " T-C " in ligne
+        ]
+        idx_parent = next(i for i, ligne in enumerate(lignes) if " T-P " in ligne)
+        idx_enfant = next(i for i, ligne in enumerate(lignes) if " T-C " in ligne)
+
+        self.assertEqual(idx_enfant, idx_parent + 1, "Le sous-ticket doit suivre son parent")
+        self.assertIn("└", lignes[idx_enfant], "Le sous-ticket doit être précédé de « └ »")
+
+    def test_owner_affiche_pour_ticket_assigned(self) -> None:
+        self.db.upsert_ticket(
+            "demo", "T-O", "Ticket tenu par un chef de chantier", milestone_id="M1",
+            priority="P1", complexity="S",
+        )
+        self.db.update_ticket("demo", "T-O", state="ASSIGNED", owner="ouvrier-42")
+
+        out = strip_ansi(pmo_dashboard.render_pmo_screen(self.db, "demo", width=105))
+        ligne = next(ligne for ligne in out.splitlines() if " T-O " in ligne)
+
+        self.assertIn("ouvrier-42", ligne, "Le nom du détenteur doit être affiché")
+
+    def test_lane_interactive_affichee_comme_chantier(self) -> None:
+        self.db.upsert_ticket(
+            "demo", "T-I", "Ticket interactif", milestone_id="M1",
+            priority="P1", complexity="S",
+        )
+        self.db.update_ticket("demo", "T-I", lane="interactive")
+
+        out = strip_ansi(pmo_dashboard.render_pmo_screen(self.db, "demo", width=105))
+        ligne = next(ligne for ligne in out.splitlines() if " T-I " in ligne)
+
+        self.assertIn("chantier", ligne, "La voie interactive doit s'afficher « chantier »")
+        self.assertNotIn("interactive", ligne)
+
     def test_signature_render_pmo_screen_inchangee(self) -> None:
         params = inspect.signature(pmo_dashboard.render_pmo_screen).parameters
         self.assertEqual(list(params), ["db", "project_id", "width"])

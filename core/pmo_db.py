@@ -213,6 +213,8 @@ class CockpitDB:
                 ("contract", "TEXT DEFAULT ''"),
                 ("test_cmd", "TEXT DEFAULT ''"),
                 ("lane", "TEXT DEFAULT ''"),
+                ("claimed_pid", "INTEGER"),
+                ("parent_id", "TEXT DEFAULT ''"),
             ):
                 if col not in existing:
                     conn.execute(f"ALTER TABLE tickets ADD COLUMN {col} {ddl}")
@@ -291,14 +293,41 @@ class CockpitDB:
         files_readonly: list[str] | None = None,
         contract: str = "",
         test_cmd: str = "",
+        parent_id: str = "",
     ) -> None:
         files_owned = files_owned or []
         for f in files_owned:
             if is_secret_or_forbidden_path(f):
                 raise ValueError(f"Sécurité R7 : fichier interdit dans files_owned ({f})")
 
+        parent_id = (parent_id or "").strip()
         depends_on = depends_on or []
         with self._connect() as conn:
+            if parent_id:
+                parent_row = conn.execute(
+                    "SELECT * FROM tickets WHERE project_id = ? AND id = ?",
+                    (project_id, parent_id),
+                ).fetchone()
+                if not parent_row:
+                    raise ValueError(f"Le ticket parent {parent_id} n'existe pas dans le projet {project_id}.")
+                if parent_row["parent_id"]:
+                    raise ValueError(
+                        f"Sous-ticket interdit sur {parent_id} : le parent a déjà un parent ({parent_row['parent_id']})."
+                    )
+                if parent_row["state"] == "MERGED":
+                    raise ValueError(f"Le ticket parent {parent_id} est déjà MERGED.")
+                parent_files = {
+                    normalize_rel_path(pf)
+                    for pf in json.loads(parent_row["files_owned_json"] or "[]")
+                    if normalize_rel_path(pf)
+                }
+                for f in files_owned:
+                    norm_f = normalize_rel_path(f)
+                    if norm_f not in parent_files:
+                        raise ValueError(
+                            f"Le fichier {norm_f} n'appartient pas aux files_owned du parent {parent_id}."
+                        )
+
             if depends_on and state == "READY":
                 placeholders = ",".join("?" for _ in depends_on)
                 rows = conn.execute(
@@ -314,8 +343,8 @@ class CockpitDB:
                 INSERT OR REPLACE INTO tickets
                 (project_id, id, milestone_id, title, priority, complexity, state, owner,
                  files_owned_json, acceptance_json, depends_on_json, fail_count, touches_sensitive, updated_at,
-                 readonly_json, contract, test_cmd)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 readonly_json, contract, test_cmd, parent_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -335,8 +364,18 @@ class CockpitDB:
                     json.dumps(files_readonly or [], ensure_ascii=False),
                     contract,
                     test_cmd,
+                    parent_id,
                 ),
             )
+
+    def children(self, project_id: str, parent_id: str) -> list[dict[str, Any]]:
+        """Retourne les tickets enfants d'un parent dans le projet, triés par id."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tickets WHERE project_id = ? AND parent_id = ? ORDER BY id",
+                (project_id, parent_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_ticket(self, project_id: str, ticket_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -369,6 +408,62 @@ class CockpitDB:
         with self._connect() as conn:
             conn.execute(
                 "DELETE FROM file_locks WHERE project_id = ? AND ticket_id = ?", (project_id, ticket_id)
+            )
+
+    def claim_ticket(self, project_id: str, ticket_id: str, pid: int) -> tuple[bool, str]:
+        """Prend en charge un ticket de manière atomique (BEGIN IMMEDIATE)."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state, owner, claimed_pid FROM tickets WHERE project_id = ? AND id = ?",
+                (project_id, ticket_id),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                return False, "état inconnu"
+            state = row["state"]
+            if state == "READY":
+                conn.execute(
+                    "UPDATE tickets SET state = 'ASSIGNED', claimed_pid = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE project_id = ? AND id = ?",
+                    (pid, project_id, ticket_id),
+                )
+                conn.commit()
+                return True, ""
+            if state in ("ASSIGNED", "GATE0", "GATE1"):
+                claimed_pid = row["claimed_pid"]
+                if claimed_pid is None:
+                    conn.rollback()
+                    return False, f"pris en mode interactif par {row['owner']}"
+                try:
+                    os.kill(int(claimed_pid), 0)
+                except ProcessLookupError:
+                    conn.execute(
+                        "UPDATE tickets SET claimed_pid = ?, updated_at = CURRENT_TIMESTAMP "
+                        "WHERE project_id = ? AND id = ?",
+                        (pid, project_id, ticket_id),
+                    )
+                    conn.commit()
+                    return True, ""
+                except PermissionError:
+                    pass
+                conn.rollback()
+                return False, f"déjà en cours d'exécution (pid {claimed_pid})"
+            conn.rollback()
+            return False, f"état {state}"
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def unclaim_ticket(self, project_id: str, ticket_id: str) -> None:
+        """Relâche claimed_pid à NULL sans modifier l'état du ticket."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE tickets SET claimed_pid = NULL, updated_at = CURRENT_TIMESTAMP WHERE project_id = ? AND id = ?",
+                (project_id, ticket_id),
             )
 
     def add_event(self, project_id: str, ticket_id: str | None, kind: str, detail: str = "") -> None:
@@ -405,23 +500,44 @@ class CockpitDB:
                 [project_id, ticket_id, *fields.values()],
             )
 
+    def last_run(self, project_id: str, ticket_id: str) -> dict[str, Any] | None:
+        """Retourne le dernier run enregistré pour ce ticket, ou None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM runs WHERE project_id = ? AND ticket_id = ? ORDER BY id DESC LIMIT 1",
+                (project_id, ticket_id),
+            ).fetchone()
+        return dict(row) if row else None
+
     def acquire_locks(self, project_id: str, ticket_id: str, files: list[str]) -> tuple[bool, list[str]]:
         norm_files = [normalize_rel_path(f) for f in files]
         conflicts: list[str] = []
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            t_row = conn.execute(
+                "SELECT parent_id FROM tickets WHERE project_id = ? AND id = ?",
+                (project_id, ticket_id),
+            ).fetchone()
+            parent_id = (t_row["parent_id"] or "") if t_row else ""
             for f in norm_files:
                 row = conn.execute(
                     "SELECT ticket_id FROM file_locks WHERE project_id = ? AND file_path = ?",
                     (project_id, f),
                 ).fetchone()
                 if row and row["ticket_id"] != ticket_id:
+                    if parent_id and row["ticket_id"] == parent_id:
+                        continue
                     conflicts.append(f"{f} (verrouillé par {row['ticket_id']})")
             if conflicts:
                 conn.rollback()
                 return False, conflicts
             for f in norm_files:
+                if parent_id:
+                    conn.execute(
+                        "UPDATE file_locks SET ticket_id = ? WHERE project_id = ? AND file_path = ? AND ticket_id = ?",
+                        (ticket_id, project_id, f, parent_id),
+                    )
                 conn.execute(
                     "INSERT OR IGNORE INTO file_locks (project_id, file_path, ticket_id) VALUES (?, ?, ?)",
                     (project_id, f, ticket_id),
@@ -434,17 +550,37 @@ class CockpitDB:
         finally:
             conn.close()
 
+    def return_locks_to_parent(self, project_id: str, ticket_id: str) -> None:
+        """Rend au parent tous les verrous du ticket ; sans effet si le ticket n'a pas de parent."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT parent_id FROM tickets WHERE project_id = ? AND id = ?",
+                (project_id, ticket_id),
+            ).fetchone()
+            parent_id = (row["parent_id"] or "") if row else ""
+            if not parent_id:
+                return
+            conn.execute(
+                "UPDATE file_locks SET ticket_id = ? WHERE project_id = ? AND ticket_id = ?",
+                (parent_id, project_id, ticket_id),
+            )
+
     def complete_and_merge_ticket(self, project_id: str, ticket_id: str) -> list[str]:
         unblocked: list[str] = []
+        ticket = self.get_ticket(project_id, ticket_id)
+        has_parent = bool(ticket and ticket.get("parent_id"))
+        if has_parent:
+            self.return_locks_to_parent(project_id, ticket_id)
         with self._connect() as conn:
             conn.execute(
                 "UPDATE tickets SET state = 'MERGED', updated_at = CURRENT_TIMESTAMP WHERE project_id = ? AND id = ?",
                 (project_id, ticket_id),
             )
-            conn.execute(
-                "DELETE FROM file_locks WHERE project_id = ? AND ticket_id = ?",
-                (project_id, ticket_id),
-            )
+            if not has_parent:
+                conn.execute(
+                    "DELETE FROM file_locks WHERE project_id = ? AND ticket_id = ?",
+                    (project_id, ticket_id),
+                )
             blocked_rows = conn.execute(
                 "SELECT id, depends_on_json FROM tickets WHERE project_id = ? AND state = 'BLOCKED'",
                 (project_id,),
@@ -631,6 +767,7 @@ class CockpitDB:
                 1200 if t["state"] == "ASSIGNED" else 0
             )
             score = state_bonus + ms_bonus + p_weight + unblock_bonus if t["state"] != "BLOCKED" else -100
+            t["parent_id"] = t.get("parent_id") or ""
             t["critical_score"] = score
             t["unblocks_count"] = dependents_count.get(t["id"], 0)
             queue.append(t)
