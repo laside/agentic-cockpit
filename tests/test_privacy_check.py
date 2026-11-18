@@ -108,6 +108,61 @@ class TestPrivacyCheck(unittest.TestCase):
         self.assertEqual(res.returncode, 0, msg=res.stdout + res.stderr)
         self.assertEqual(res.stdout.strip(), "")
 
+    def test_tracked_file_name_with_forbidden_word_fails_without_leaking_name(self) -> None:
+        """Nom de fichier suivi contenant un mot interdit -> code 1, sans afficher le nom."""
+        target = self.repo / "motsecret_notes.txt"
+        target.write_text("Contenu parfaitement public.\n", encoding="utf-8")
+        _git(self.repo, "add", "motsecret_notes.txt")
+
+        res = self._run_check("--deny-file", str(self.deny_file))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("mot-interdit#", res.stdout)
+        self.assertNotIn("motsecret", res.stdout)
+        self.assertNotIn("motsecret", res.stderr)
+
+    def test_tracked_directory_name_with_forbidden_word_fails_without_leaking_name(self) -> None:
+        """Nom de dossier suivi contenant un mot interdit -> code 1, sans afficher le chemin."""
+        folder = self.repo / "motsecret_dossier"
+        folder.mkdir()
+        (folder / "notes.txt").write_text("Contenu public.\n", encoding="utf-8")
+        _git(self.repo, "add", "motsecret_dossier/notes.txt")
+
+        res = self._run_check("--deny-file", str(self.deny_file))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("mot-interdit#", res.stdout)
+        self.assertNotIn("motsecret", res.stdout)
+        self.assertNotIn("notes.txt", res.stdout)
+
+    def test_clean_tracked_path_is_accepted(self) -> None:
+        """Un chemin suivi sans motif interdit -> code 0."""
+        folder = self.repo / "documents"
+        folder.mkdir()
+        (folder / "notes_propres.txt").write_text("Contenu public.\n", encoding="utf-8")
+        _git(self.repo, "add", "documents/notes_propres.txt")
+
+        res = self._run_check("--deny-file", str(self.deny_file))
+        self.assertEqual(res.returncode, 0, msg=res.stdout + res.stderr)
+
+    def test_generic_flag_checks_paths_for_private_ip_without_leaking_name(self) -> None:
+        """--generic applique l'IPv4 RFC1918 aux chemins sans afficher le nom."""
+        target = self.repo / "10.42.0.7.txt"
+        target.write_text("Contenu public.\n", encoding="utf-8")
+        _git(self.repo, "add", "10.42.0.7.txt")
+
+        res = self._run_check("--generic")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("ipv4-rfc1918", res.stdout)
+        self.assertNotIn("10.42.0.7", res.stdout)
+
+    def test_generic_flag_ignores_deny_words_in_paths(self) -> None:
+        """--generic n'applique pas la liste privée aux chemins."""
+        target = self.repo / "motsecret_notes.txt"
+        target.write_text("Contenu public.\n", encoding="utf-8")
+        _git(self.repo, "add", "motsecret_notes.txt")
+
+        res = self._run_check("--generic")
+        self.assertEqual(res.returncode, 0, msg=res.stdout + res.stderr)
+
     def test_binary_file_is_ignored(self) -> None:
         """Fichier binaire suivi -> ignoré sans erreur."""
         binary = self.repo / "image.bin"
