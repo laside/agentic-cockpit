@@ -6,7 +6,7 @@ CMD="${1:-open}"
 shift || true
 
 usage() {
-  echo "Usage: cockpit {open|switch|new-project|secret|costs|judge-calibrate|roadmap|ticket|plan|run|auto|claim|submit|release|sync|status|brief|note|abandon|dispatch|merge|events|relaunch|privacy-check|install-hooks|help}"
+  echo "Usage: cockpit {open|switch|new-project|secret|costs|judge-calibrate|roadmap|ticket|plan|run|auto|claim|submit|release|sync|status|brief|note|lessons|abandon|dispatch|merge|events|relaunch|privacy-check|install-hooks|help}"
 }
 
 case "$CMD" in
@@ -79,6 +79,9 @@ PY
     ;;
   judge-calibrate)
     exec python3 "$COCKPIT_HOME/core/judge_calibrate.py" "$@"
+    ;;
+  lessons)
+    exec python3 "$COCKPIT_HOME/core/lessons.py" "$@"
     ;;
   roadmap)
     PROJ="${1:-${PROJECT:-cockpit}}"
