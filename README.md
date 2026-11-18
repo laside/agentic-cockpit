@@ -91,7 +91,8 @@ Toutes les commandes passent par le lanceur unique `bin/cockpit` :
   interactif.
 - `cockpit submit T-xxx <projet>` / `cockpit release T-xxx <projet>` : soumet le worktree aux portes
   ou relâche le ticket vers `READY`.
-- `cockpit status <projet>` : état synthétique du projet (0 token).
+- `cockpit sync <projet>` : clôt les tickets `PR_OPEN` dont la PR est fusionnée (0 token).
+- `cockpit status <projet>` : état synthétique du projet (0 token) ; lance `sync` au préalable.
 - `cockpit note T-xxx <projet> "texte"` : consigne une note utile aux autres agents.
 - `cockpit costs <projet> [--since AAAA-MM-JJ]` : rapport des coûts workers et architecte.
 - `cockpit judge-calibrate [--runs N] [--json chemin]` : calibre le juge de revue sur un jeu de cas.
@@ -130,7 +131,11 @@ avec l'URL). Le corps de PR est généré sans LLM (contrat, fichiers modifiés,
 Portes 0/1, coût du dernier run lu dans la table `runs`) ; le titre et le corps passent par la liste
 privée avant tout push (`PR_PRIVACY_FAIL` sinon). `PR_OPEN` est hors des états actifs : le ticket
 n'est ni relancé ni compté en échec par `auto`, ses dépendants restent bloqués, et `status`
-l'affiche dans la section « PR OUVERTES ».
+l'affiche dans la section « PR OUVERTES ». `cockpit sync <projet>` interroge `gh pr view` pour chaque
+ticket `PR_OPEN` : si la PR est fusionnée, `origin/<branche par défaut>` est récupérée en fast-forward
+dans la racine, le worktree et la branche locale sont retirés, le ticket passe `MERGED` et ses
+dépendants sont débloqués. Une PR fermée sans fusion journalise `PR_CLOSED` sans changer l'état ; une
+erreur réseau ou un `gh` absent laisse tout inchangé. `cockpit status` appelle `sync` d'abord.
 
 ## Économie de tokens
 

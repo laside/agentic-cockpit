@@ -6,7 +6,7 @@ CMD="${1:-open}"
 shift || true
 
 usage() {
-  echo "Usage: cockpit {open|switch|new-project|secret|costs|judge-calibrate|roadmap|ticket|run|auto|claim|submit|release|status|note|abandon|dispatch|merge|events|relaunch|privacy-check|install-hooks|help}"
+  echo "Usage: cockpit {open|switch|new-project|secret|costs|judge-calibrate|roadmap|ticket|run|auto|claim|submit|release|sync|status|note|abandon|dispatch|merge|events|relaunch|privacy-check|install-hooks|help}"
 }
 
 case "$CMD" in
@@ -71,7 +71,7 @@ PY
   relaunch)
     exec bash "$COCKPIT_HOME/scripts/relaunch.sh" "$@"
     ;;
-  run|merge|ticket|events|auto|claim|submit|release|status|note|abandon)
+  run|merge|ticket|events|auto|claim|submit|release|sync|status|note|abandon)
     exec python3 "$COCKPIT_HOME/core/pipeline.py" "$CMD" "$@"
     ;;
   costs)

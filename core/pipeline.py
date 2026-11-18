@@ -1075,6 +1075,89 @@ def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool =
             lock_file.close()
 
 
+def _gh_pr_state(gh: str, branch: str, cwd: Path) -> tuple[str, str, bool]:
+    """Interroge `gh pr view` : (state, mergedAt, ok). ok=False si gh absent ou erreur réseau."""
+    try:
+        res = sh([gh, "pr", "view", branch, "--json", "state,mergedAt"], cwd, check=False, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return "", "", False
+    if res.returncode != 0:
+        return "", "", False
+    try:
+        data = json.loads(res.stdout or "{}")
+    except (ValueError, TypeError):
+        return "", "", False
+    if not isinstance(data, dict):
+        return "", "", False
+    state = str(data.get("state") or "").upper()
+    merged_at = str(data.get("mergedAt") or "")
+    return state, merged_at, bool(state)
+
+
+def sync_project(db: CockpitDB, project_id: str) -> int:
+    """Clôt les tickets PR_OPEN dont la PR GitHub est fusionnée (0 token)."""
+    proj = db.get_project(project_id)
+    if not proj:
+        raise PipelineError(f"Projet inconnu : {project_id}")
+    pr_tickets = [t for t in db.get_prioritized_queue(project_id) if t.get("state") == "PR_OPEN"]
+    if not pr_tickets:
+        return 0
+
+    root = Path(proj["root_path"])
+    default = proj["default_branch"]
+    central = load_toml(config_paths.config_file("projects.toml", COCKPIT_HOME)).get("projects", {}).get(
+        project_id, {}
+    )
+    remote = str(central.get("remote", "origin")).strip() or "origin"
+    gh = os.environ.get("COCKPIT_GH", "gh")
+    errors = 0
+
+    for ticket in pr_tickets:
+        ticket_id = ticket["id"]
+        branch = f"feat/{ticket_id}"
+        state, merged_at, ok = _gh_pr_state(gh, branch, root)
+        if not ok:
+            say(f"{ticket_id} : GitHub injoignable ou gh absent — état inchangé.")
+            errors += 1
+            continue
+        if state == "OPEN":
+            continue
+        if state == "CLOSED" and not merged_at:
+            db.add_event(project_id, ticket_id, "PR_CLOSED", f"{branch} fermée sans fusion")
+            say(f"{ticket_id} : PR fermée sans fusion — relancer le ticket ou l'abandonner (état inchangé).")
+            continue
+        if state != "MERGED" and not merged_at:
+            continue
+
+        if sh(["git", "symbolic-ref", "--short", "HEAD"], root, check=False).stdout.strip() != default:
+            raise PipelineError(f"Le dépôt racine doit être sur {default} pour synchroniser {ticket_id}.")
+        if sh(["git", "status", "--porcelain", "--untracked-files=no"], root).stdout.strip():
+            raise PipelineError(
+                f"Le dépôt racine a des modifications suivies non commitées : synchronisation refusée."
+            )
+        sh(["git", "fetch", remote], root)
+        merge = sh(["git", "merge", "--ff-only", f"{remote}/{default}"], root, check=False)
+        if merge.returncode != 0:
+            raise PipelineError(
+                f"{ticket_id} : fusion fast-forward impossible depuis {remote}/{default} : "
+                f"{(merge.stderr or merge.stdout).strip()[:300]}"
+            )
+        leaks = commit_identity_leaks(root, f"{remote}/{default}")
+        if leaks:
+            db.add_event(project_id, ticket_id, "PRIVACY_LEAK", ", ".join(leaks))
+            say(f"{ticket_id} : ATTENTION, identité de commit non autorisée sur {default} ({', '.join(leaks)}).")
+        wt = Path(proj["wt_tickets_dir"]) / ticket_id
+        sh(["git", "worktree", "remove", "--force", str(wt)], root, check=False)
+        sh(["git", "branch", "-D", branch], root, check=False)
+        unblocked = db.complete_and_merge_ticket(project_id, ticket_id)
+        db.add_event(
+            project_id, ticket_id, "MERGED", f"PR fusionnée — débloque : " + (", ".join(unblocked) or "rien")
+        )
+        say(f"{ticket_id} : PR fusionnée, ticket MERGED. Débloqués : {', '.join(unblocked) or 'aucun'}")
+
+    return 1 if errors else 0
+
+
 # ───────────────────────────── tickets & vues ─────────────────────────────
 
 
@@ -1475,6 +1558,9 @@ def main(argv: list[str] | None = None) -> int:
     p_release.add_argument("ticket")
     p_release.add_argument("project", nargs="?", default=default_project)
 
+    p_sync = sub.add_parser("sync", help="Clôt les tickets PR_OPEN dont la PR est fusionnée (0 token)")
+    p_sync.add_argument("project", nargs="?", default=default_project)
+
     p_status = sub.add_parser("status", help="État synthétique du projet (0 token)")
     p_status.add_argument("project", nargs="?", default=default_project)
 
@@ -1515,9 +1601,17 @@ def main(argv: list[str] | None = None) -> int:
             if not args.project:
                 raise PipelineError("Projet manquant : cockpit release T-xxx <projet>")
             return release_ticket(db, args.project, args.ticket)
+        if args.cmd == "sync":
+            if not args.project:
+                raise PipelineError("Projet manquant : cockpit sync <projet>")
+            return sync_project(db, args.project)
         if args.cmd == "status":
             if not args.project:
                 raise PipelineError("Projet manquant : cockpit status <projet>")
+            try:
+                sync_project(db, args.project)
+            except PipelineError as exc:
+                say(f"sync : {exc}")
             print(build_status(db, args.project))
             return 0
         if args.cmd == "note":
