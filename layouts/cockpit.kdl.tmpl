@@ -1,0 +1,38 @@
+// Agentic Cockpit V2 — Template Zellij par Projet (Option A : session cockpit-__PROJECT_ID__)
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+
+    tab name="1: Cockpit Vibe (__PROJECT_NAME__)" focus=true {
+        pane split_direction="vertical" {
+            pane size="50%" split_direction="horizontal" {
+                pane name="Claude • Architecte (__PROJECT_NAME__)" cwd="__WT_SESSIONS_DIR__/wt-claude" size="60%"
+                pane name="AGY • Antigravity Pro / Argon" cwd="__WT_SESSIONS_DIR__" size="40%"
+            }
+            pane size="50%" split_direction="horizontal" {
+                pane name="PMO Roadmap & Gouverneur Quotas" cwd="__PROJECT_ROOT__" command="python3" size="60%" {
+                    args "__COCKPIT_HOME__/tui/pmo_dashboard.py" "--project" "__PROJECT_ID__"
+                }
+                pane name="DeepSeek / Mistral Vibe • Workers" cwd="__WT_SESSIONS_DIR__" size="40%"
+            }
+        }
+    }
+
+    tab name="2: Git & Land" {
+        pane split_direction="vertical" {
+            pane name="LazyGit (__PROJECT_NAME__)" cwd="__PROJECT_ROOT__" command="lazygit" size="65%"
+            pane name="Relais Git & Portes 0/1" cwd="__PROJECT_ROOT__" size="35%"
+        }
+    }
+
+    tab name="3: AI-Town (__SIDECAR_PORT__)" {
+        pane name="Village AI-Town (__PROJECT_NAME__)" cwd="__PROJECT_ROOT__"
+    }
+}

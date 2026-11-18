@@ -1,0 +1,6 @@
+- Périmètre strict : ne créer ou modifier QUE les fichiers listés dans FILES_OWNED.
+- Zéro exploration : ne pas lire hors du worktree courant (lire ./.nexus_brief.md, puis seulement les fichiers nécessaires).
+- Sécurité (R7) : interdiction absolue de lire ou commiter `.env`, `secrets/` ou `*.key`. Ne jamais ouvrir `db/`.
+- TDD : écrire le test avant l'implémentation ; tests verts avant de terminer. Les tests n'appellent ni réseau ni LLM.
+- Python stdlib uniquement, compatible 3.12. Messages et commentaires en français.
+- Ne jamais modifier la base réelle `db/cockpit_pmo.db` : les tests utilisent une base temporaire.

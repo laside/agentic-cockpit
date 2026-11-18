@@ -1,0 +1,9 @@
+db/
+logs/
+*.zip
+*.zip:Zone.Identifier
+__pycache__/
+.env
+.env.*
+!.env.example
+examples/**/*.db

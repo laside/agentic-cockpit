@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+COCKPIT_HOME="${COCKPIT_HOME:-$HOME/agentic-cockpit}"
+DB_PATH="$COCKPIT_HOME/db/cockpit_pmo.db"
+CMD="${1:-open}"
+shift || true
+
+case "$CMD" in
+  open|switch)
+    PROJ="${1:-mon-app}"
+    export PROJECT="$PROJ"
+    source "$COCKPIT_HOME/scripts/cockpit-env.sh"
+    SESSION="cockpit-$PROJECT"
+    LAYOUT_DIR="$HOME/.cache/agentic-cockpit/layouts"
+    mkdir -p "$LAYOUT_DIR" "$PROJECT_ROOT/.agents/board/inbox" "$PROJECT_ROOT/.agents/board/status"
+    LAYOUT_FILE="$LAYOUT_DIR/$SESSION.kdl"
+    sed -e "s|__PROJECT_ID__|$PROJECT|g" \
+        -e "s|__PROJECT_NAME__|$PROJECT_NAME|g" \
+        -e "s|__PROJECT_ROOT__|$PROJECT_ROOT|g" \
+        -e "s|__WT_SESSIONS_DIR__|$WT_SESSIONS_DIR|g" \
+        -e "s|__SIDECAR_PORT__|$SIDECAR_PORT|g" \
+        -e "s|__COCKPIT_HOME__|$COCKPIT_HOME|g" \
+        "$COCKPIT_HOME/layouts/cockpit.kdl.tmpl" > "$LAYOUT_FILE"
+    if zellij list-sessions --no-formatting 2>/dev/null | grep -q "^$SESSION\b"; then
+      exec zellij attach "$SESSION"
+    else
+      exec zellij --session "$SESSION" --new-session-with-layout "$LAYOUT_FILE"
+    fi
+    ;;
+  new-project)
+    bash "$COCKPIT_HOME/scripts/new-project.sh" "$@"
+    ;;
+  secret)
+    KEY="${1:-}"
+    [ -n "$KEY" ] || { echo "Usage: cockpit secret MISTRAL_API_KEY" >&2; exit 1; }
+    ENV_FILE="$COCKPIT_HOME/.env.cockpit"
+    touch "$ENV_FILE" && chmod 600 "$ENV_FILE"
+    read -r -s -p "Valeur secrète pour $KEY : " VAL
+    echo ""
+    grep -v "^${KEY}=" "$ENV_FILE" > "${ENV_FILE}.tmp" || true
+    printf '%s="%s"\n' "$KEY" "$VAL" >> "${ENV_FILE}.tmp"
+    mv "${ENV_FILE}.tmp" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    if [ "$KEY" = "MISTRAL_API_KEY" ]; then
+      python3 -c "import sys; sys.path.insert(0, '$COCKPIT_HOME/core'); from pmo_db import CockpitDB; from pathlib import Path; CockpitDB(Path('$DB_PATH')).set_mistral_key_active(True)"
+      echo "OK : Clé MISTRAL_API_KEY enregistrée et voie Mistral 25€/mois ACTIVÉE dans le Gouverneur."
+    else
+      echo "OK : Secret $KEY mis à jour dans $ENV_FILE (0600)."
+    fi
+    ;;
+  dispatch)
+    bash "$COCKPIT_HOME/scripts/dispatch-ticket.sh" "$@"
+    ;;
+  relaunch)
+    exec bash "$COCKPIT_HOME/scripts/relaunch.sh" "$@"
+    ;;
+  run|merge|ticket|events|auto)
+    exec python3 "$COCKPIT_HOME/core/pipeline.py" "$CMD" "$@"
+    ;;
+  roadmap)
+    PROJ="${1:-${PROJECT:-mon-app}}"
+    python3 "$COCKPIT_HOME/tui/pmo_dashboard.py" --project "$PROJ" --db "$DB_PATH" --once
+    ;;
+  *)
+    echo "Usage: cockpit {open|switch|new-project|secret|roadmap|ticket|run|auto|dispatch|merge|events|relaunch}" >&2
+    exit 1
+    ;;
+esac

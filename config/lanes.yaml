@@ -1,0 +1,29 @@
+# Agentic Cockpit V2 — Gouverneur de Quotas, Budgets API (20€ DS / 25€ Mistral) & Escalade Argon
+budgets:
+  currency: "EUR"
+  deepseek:
+    monthly_limit_eur: 20.00
+    daily_target_eur: 0.65
+    warn_pct: 75.0
+    crit_pct: 95.0
+  mistral:
+    monthly_limit_eur: 25.00
+    daily_target_eur: 0.83
+    warn_pct: 75.0
+    crit_pct: 95.0
+    require_env_key: "MISTRAL_API_KEY"
+    standby_fallback_lane: "deepseek_coder"
+    burst_no_window_limit: true
+
+subscriptions:
+  claude:
+    window_hours: 5
+    soft_cap_pct: 65.0
+    hard_cap_pct: 88.0
+    fallback_architect: "deepseek_reasoner"
+  agy:
+    window_hours: 5
+    soft_cap_pct: 60.0
+    hard_cap_pct: 85.0
+    cmd_standard: "agy"
+    cmd_argon: "agy --model argon"

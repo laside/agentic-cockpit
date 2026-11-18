@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+branch="$(git symbolic-ref --short -q HEAD || true)"
+if [ "$branch" = "$DEFAULT_BRANCH" ] && [ "${ALLOW_MAIN:-0}" != "1" ]; then
+  echo "REFUS : commit direct interdit sur $DEFAULT_BRANCH (utiliser un worktree feat/T-xxx ou ALLOW_MAIN=1)." >&2
+  exit 1
+fi
+staged="$(git diff --cached --name-only)"
+for f in $staged; do
+  case "$f" in
+    .env.example|*/.env.example) ;;
+    .env|*/.env|.env.*|*/.env.*|secrets/*|*/secrets/*|*exclusion.key|*.pem)
+      echo "REFUS SÉCURITÉ R7 : tentative de commit d'un fichier secret ($f)." >&2
+      exit 1 ;;
+  esac
+done
