@@ -156,6 +156,17 @@ class TestPrivacyCheck(unittest.TestCase):
         self.assertIn("contacts.md:1:", res_bad.stdout)
         self.assertNotIn("Contact privé: utilisateur@domaine-interne.org en copie", res_bad.stdout)  # privacy-check: allow
 
+    def test_github_web_flow_address_allowed_but_other_github_com_rejected(self) -> None:
+        doc = self.repo / "gh.md"
+        doc.write_text("Committer des squash : noreply@github.com\n", encoding="utf-8")
+        _git(self.repo, "add", "gh.md")
+        res_ok = self._run_check("--generic")
+        self.assertEqual(res_ok.returncode, 0, msg=res_ok.stdout + res_ok.stderr)
+
+        doc.write_text("Contact : quelquun@github.com\n", encoding="utf-8")  # privacy-check: allow
+        res_bad = self._run_check("--generic")
+        self.assertEqual(res_bad.returncode, 1)
+
     def test_generic_flag_does_not_open_deny_file(self) -> None:
         """--generic n'ouvre jamais la liste privée, même si elle correspondrait."""
         f = self.repo / "doc.txt"

@@ -24,6 +24,9 @@ ALLOWED_EMAIL_DOMAINS = frozenset(
     }
 )
 
+# Adresses exactes publiques (identité committer des squash faits par GitHub).
+ALLOWED_EMAIL_ADDRESSES = frozenset({"noreply" + "@" + "github.com"})
+
 IPV4_RE = re.compile(
     r"(?<!\d)(?<!\d\.)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?!\.\d)(?!\d)"
 )
@@ -95,6 +98,8 @@ def _check_text_line(
 
     for m in (EMAIL_RE.finditer(line) if generic else ()):
         domain = m.group(2).lower()
+        if m.group(0).lower() in ALLOWED_EMAIL_ADDRESSES:
+            continue
         if domain not in ALLOWED_EMAIL_DOMAINS:
             motifs.append("email-non-autorise")
 
@@ -200,7 +205,11 @@ def _check_commit_range(
                 motifs.extend(_check_text_line(line, deny_patterns))
             if field_name in ("author-email", "committer-email") and "@" in value:
                 domain = value.rsplit("@", 1)[-1].strip().lower()
-                if domain not in ALLOWED_EMAIL_DOMAINS and "email-non-autorise" not in motifs:
+                if (
+                    value.strip().lower() not in ALLOWED_EMAIL_ADDRESSES
+                    and domain not in ALLOWED_EMAIL_DOMAINS
+                    and "email-non-autorise" not in motifs
+                ):
                     motifs.append("email-non-autorise")
             for motif in motifs:
                 findings.append(f"commit {short_sha}: {field_name}: {motif}")
