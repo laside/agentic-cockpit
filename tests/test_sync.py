@@ -168,7 +168,7 @@ class SyncTests(unittest.TestCase):
         wt = self.wts / "T-100"
         self.wts.mkdir()
         git(self.root, "worktree", "add", str(wt), "feat/T-100")
-        self.push_merged_commit(email="secret@internal.corp")
+        self.push_merged_commit(email="secret@internal.corp")  # privacy-check: allow
         os.environ["GH_MODE"] = "MERGED"
 
         out = io.StringIO()
