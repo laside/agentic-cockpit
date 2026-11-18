@@ -1603,10 +1603,17 @@ def main(argv: list[str] | None = None) -> int:
     p_auto.add_argument("--dry-run", action="store_true")
     p_auto.add_argument("--parent", default="")
 
+    p_plan = sub.add_parser("plan", help="Rédige un plan de 2 à 4 tickets DRAFT")
+    p_plan.add_argument("project")
+    p_plan.add_argument("objective")
+    p_plan.add_argument("--lane", default="deepseek_coder", help="Voie du rédacteur")
+    p_plan.add_argument("--max-tickets", type=int, default=4)
+
     p_ticket = sub.add_parser("ticket", help="Gestion des tickets (0 token)")
     p_ticket.add_argument("action", choices=["add", "list", "show", "draft", "promote"])
     p_ticket.add_argument("project")
     p_ticket.add_argument("title", nargs="?", default="")
+    p_ticket.add_argument("more", nargs="*", default=[])
     p_ticket.add_argument("--lane", default="deepseek_coder", help="Voie du rédacteur pour `draft`")
     p_ticket.add_argument("--id", default="")
     p_ticket.add_argument("--milestone", default=None)
@@ -1720,24 +1727,36 @@ def main(argv: list[str] | None = None) -> int:
                 drafter.draft_ticket(db, args.project, args.title, args.lane)
                 return 0
             if args.action == "promote":
-                first = (args.project or "").strip()
-                second = (args.title or "").strip()
-                if re.fullmatch(r"T-\d+", first):
-                    ticket_id, project = first, (second or default_project)
-                elif re.fullmatch(r"T-\d+", second):
-                    ticket_id, project = second, first
-                else:
-                    ticket_id, project = "", ""
-                if not ticket_id or not project:
-                    raise PipelineError("Usage : cockpit ticket promote T-xxx <projet>")
+                tokens = [args.project, args.title, *getattr(args, "more", [])]
+                ticket_ids = [token for token in tokens if token and re.fullmatch(r"T-\d+", token)]
+                projects = [token for token in tokens if token and not re.fullmatch(r"T-\d+", token)]
+                if len(projects) > 1:
+                    raise PipelineError(
+                        "Usage : cockpit ticket promote <projet> T-xxx T-yyy ... "
+                        "ou cockpit ticket promote T-xxx <projet>"
+                    )
+                project = projects[0] if projects else default_project
+                if not ticket_ids or not project:
+                    raise PipelineError(
+                        "Usage : cockpit ticket promote <projet> T-xxx T-yyy ... "
+                        "ou cockpit ticket promote T-xxx <projet>"
+                    )
                 import drafter
-                drafter.promote_ticket(db, project, ticket_id)
+                drafter.promote_tickets(db, project, ticket_ids)
                 return 0
             if args.action == "add" and not args.title:
                 raise PipelineError("Titre manquant : cockpit ticket add <projet> \"titre\" --files a,b")
             if args.action == "show" and not args.id:
                 raise PipelineError("Identifiant manquant : cockpit ticket show <projet> --id T-xxx")
             return cmd_ticket(db, args)
+        if args.cmd == "plan":
+            if not args.project or not args.objective:
+                raise PipelineError("Usage : cockpit plan <projet> \"objectif\" [--lane L] [--max-tickets N]")
+            if not 2 <= args.max_tickets <= 4:
+                raise PipelineError("--max-tickets doit être borné entre 2 et 4.")
+            import drafter
+            drafter.plan_tickets(db, args.project, args.objective, args.lane, args.max_tickets)
+            return 0
         if args.cmd == "events":
             return cmd_events(db, args.project, args.limit)
     except PipelineError as exc:

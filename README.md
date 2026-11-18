@@ -83,8 +83,11 @@ Toutes les commandes passent par le lanceur unique `bin/cockpit` :
 
 - `cockpit ticket add <projet> "Titre" --files a.py,tests/test_a.py --accept "..."` : crée un ticket.
 - `cockpit ticket draft <projet> "Objectif" [--lane L]` : fait rédiger un ticket `DRAFT` par un worker.
-- `cockpit ticket promote T-xxx <projet>` : passe un `DRAFT` à `READY` (ou `BLOCKED` si une
-  dépendance n'est pas `MERGED`).
+- `cockpit plan <projet> "Objectif" [--lane L] [--max-tickets N]` : fait rédiger un plan de 2 à 4
+  tickets `DRAFT` (N borné 2..4, défaut 4) avec dépendances mappées.
+- `cockpit ticket promote <projet> T-001 T-002 ...` : passe plusieurs `DRAFT` à `READY` (ou
+  `BLOCKED` si une dépendance n'est pas `MERGED`), en validant tous les ids avant toute promotion.
+- `cockpit ticket promote T-xxx <projet>` : forme historique, conservée.
 - `cockpit run T-xxx <projet> [--lane <voie>] [--no-gate1]` : exécute un ticket (worker, Porte 0,
   Porte 1, commit).
 - `cockpit auto <projet> [--dry-run] [--auto-merge] [--parent T-xxx] [--slots N] [--max-tickets N]` :
@@ -115,6 +118,17 @@ Toutes les commandes passent par le lanceur unique `bin/cockpit` :
 vide, confidentialité). En cas de refus, une seule relance reçoit l'erreur dans son prompt, puis
 aucun ticket n'est créé. Un brouillon valide devient un ticket `DRAFT` : `cockpit auto` et
 `cockpit run` l'ignorent jusqu'à `cockpit ticket promote T-xxx <projet>`.
+
+`cockpit plan <projet> "Objectif" [--lane L] [--max-tickets N]` réutilise le même worktree jetable
+et demande au worker un `plan.json` (`{"tickets": [...]}`). Chaque ticket contient `title`, `size`,
+`prio`, `files`, `contract`, `accept` et `depends_on` (indices 0-based). Le plan doit contenir 2 à 4
+tickets ; chaque ticket passe les règles du mode `draft`, les indices de dépendance doivent être
+valides et sans cycle. Un seul ticket invalide refuse tout le plan (au plus une relance), sans créer
+aucun ticket ni laisser de worktree `_draft-*`. Les tickets valides sont créés atomiquement en
+`DRAFT`, avec des ids consécutifs, `owner="drafter"`, les `depends_on` mappés vers les ids réels et
+un événement `PLAN_CREATED`. Le résumé affiche une ligne compacte par ticket
+(`T-xxx [S/P2] titre (dépend de T-yyy)`) puis le total, suivi des chevauchements de fichiers
+éventuels (signalés sans bloquer la création).
 
 ## Multi-projets
 

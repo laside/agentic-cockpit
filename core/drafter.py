@@ -28,6 +28,8 @@ ALLOWED_PRIOS = ("P0", "P1", "P2", "P3")
 MAX_FILES = 8
 MAX_CONTRACT_CHARS = 1500
 MAX_ATTEMPTS = 2
+PLAN_MIN_TICKETS = 2
+PLAN_MAX_TICKETS = 4
 
 
 def _pipeline():
@@ -136,6 +138,69 @@ def validate_draft(draft: Any, wt: Path) -> str | None:
     return None
 
 
+def _plan_limit(max_tickets: int) -> int:
+    try:
+        limit = int(max_tickets)
+    except (TypeError, ValueError):
+        limit = PLAN_MAX_TICKETS
+    return max(PLAN_MIN_TICKETS, min(limit, PLAN_MAX_TICKETS))
+
+
+def validate_plan(plan: Any, wt: Path, max_tickets: int = PLAN_MAX_TICKETS) -> str | None:
+    """Valide un plan multi-tickets : 2..N tickets, règles du mode draft, dépendances acycliques."""
+    if not isinstance(plan, dict):
+        return "plan.json doit contenir un objet JSON."
+    tickets = plan.get("tickets")
+    if not isinstance(tickets, list):
+        return "La clé `tickets` doit être une liste."
+    limit = _plan_limit(max_tickets)
+    if not (PLAN_MIN_TICKETS <= len(tickets) <= limit):
+        return (
+            f"Le plan doit contenir entre {PLAN_MIN_TICKETS} et {limit} tickets "
+            f"(reçu {len(tickets)})."
+        )
+
+    for index, item in enumerate(tickets):
+        refusal = validate_draft(item, wt)
+        if refusal:
+            return f"Ticket {index} : {refusal}"
+
+    graph: list[list[int]] = []
+    for index, item in enumerate(tickets):
+        raw = item.get("depends_on")
+        if raw is None:
+            raw = []
+        if not isinstance(raw, list):
+            return f"Ticket {index} : `depends_on` doit être une liste d'indices."
+        deps: list[int] = []
+        for dep in raw:
+            if isinstance(dep, bool) or not isinstance(dep, int):
+                return f"Ticket {index} : indice de dépendance invalide ({dep!r})."
+            if dep < 0 or dep >= len(tickets):
+                return f"Ticket {index} : dépendance hors bornes ({dep})."
+            deps.append(dep)
+        graph.append(deps)
+
+    colors = [0] * len(tickets)
+
+    def _has_cycle(node: int) -> bool:
+        if colors[node] == 1:
+            return True
+        if colors[node] == 2:
+            return False
+        colors[node] = 1
+        for dep in graph[node]:
+            if _has_cycle(dep):
+                return True
+        colors[node] = 2
+        return False
+
+    for index in range(len(tickets)):
+        if _has_cycle(index):
+            return "Le plan contient un cycle de dépendances entre tickets."
+    return None
+
+
 def _clean_draft(draft: dict[str, Any]) -> dict[str, Any]:
     return {
         "title": str(draft.get("title") or "").strip(),
@@ -145,6 +210,12 @@ def _clean_draft(draft: dict[str, Any]) -> dict[str, Any]:
         "contract": str(draft.get("contract") or "").strip(),
         "accept": _normalize_list(draft.get("accept")),
     }
+
+
+def _clean_plan_ticket(draft: dict[str, Any]) -> dict[str, Any]:
+    clean = _clean_draft(draft)
+    clean["depends_on"] = [int(dep) for dep in (draft.get("depends_on") or [])]
+    return clean
 
 
 def _default_ref(root: Path, default_branch: str) -> str:
@@ -198,6 +269,31 @@ def build_prompt(objective: str, error: str = "") -> str:
         prompt += (
             "\n\nUne tentative précédente a été refusée. Corrige uniquement ce point :\n"
             f"{error}\nRéécris entièrement draft.json puis arrête-toi."
+        )
+    return prompt
+
+
+def build_plan_prompt(objective: str, max_tickets: int = PLAN_MAX_TICKETS, error: str = "") -> str:
+    """Construit le prompt du plan multi-tickets, en réinjectant l'erreur sur relance."""
+    pipe = _pipeline()
+    path = pipe.COCKPIT_HOME / "prompts" / "sys_drafter_plan.md"
+    try:
+        base = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        base = (
+            "Tu es un rédacteur de plans. Explore le dépôt et écris uniquement `plan.json` "
+            "avec une clé tickets, chaque ticket ayant title, size, prio, files, contract, "
+            "accept, depends_on (indices 0-based)."
+        )
+    limit = _plan_limit(max_tickets)
+    prompt = (
+        f"{base}\n\nObjectif : {objective.strip()}\n\n"
+        f"Produis entre {PLAN_MIN_TICKETS} et {limit} tickets."
+    )
+    if error:
+        prompt += (
+            "\n\nUne tentative précédente a été refusée. Corrige uniquement ce point :\n"
+            f"{error}\nRéécris entièrement plan.json puis arrête-toi."
         )
     return prompt
 
@@ -366,31 +462,204 @@ def draft_ticket(
         _remove_worktree(root, wt)
 
 
+def _rollback_plan(db: CockpitDB, project_id: str, ticket_ids: list[str]) -> None:
+    """Supprime les tickets d'un plan dont la création a échoué en cours de route."""
+    if not ticket_ids:
+        return
+    placeholders = ",".join("?" for _ in ticket_ids)
+    with db._connect() as conn:
+        conn.execute(
+            f"DELETE FROM runs WHERE project_id = ? AND ticket_id IN ({placeholders})",
+            [project_id, *ticket_ids],
+        )
+        conn.execute(
+            f"DELETE FROM events WHERE project_id = ? AND ticket_id IN ({placeholders})",
+            [project_id, *ticket_ids],
+        )
+        conn.execute(
+            f"DELETE FROM tickets WHERE project_id = ? AND id IN ({placeholders})",
+            [project_id, *ticket_ids],
+        )
+
+
+def _print_plan_summary(ids: list[str], clean: list[dict[str, Any]]) -> None:
+    """Résumé compact : une ligne par ticket, le total, puis les chevauchements de fichiers."""
+    pipe = _pipeline()
+    for ticket_id, item in zip(ids, clean):
+        deps = [ids[index] for index in item["depends_on"]]
+        suffix = f"(dépend de {', '.join(deps)})" if deps else "(aucune dépendance)"
+        pipe.say(f"{ticket_id} [{item['size']}/{item['prio']}] {item['title']} {suffix}")
+    pipe.say(f"Total : {len(ids)} tickets DRAFT")
+
+    file_sets = [
+        {normalize_rel_path(str(path)) for path in item["files"] if normalize_rel_path(str(path))}
+        for item in clean
+    ]
+    for left in range(len(ids)):
+        for right in range(left + 1, len(ids)):
+            common = sorted(file_sets[left].intersection(file_sets[right]))
+            if common:
+                pipe.say(
+                    f"Chevauchement de fichiers : {ids[left]}/{ids[right]} → {', '.join(common)}"
+                )
+
+
+def plan_tickets(
+    db: CockpitDB,
+    project_id: str,
+    objective: str,
+    lane: str = DEFAULT_LANE,
+    max_tickets: int = PLAN_MAX_TICKETS,
+) -> list[dict[str, Any]]:
+    """Fait rédiger un plan, le valide en bloc, puis crée tous les tickets DRAFT d'un coup."""
+    pipe = _pipeline()
+    proj = db.get_project(project_id)
+    if not proj:
+        raise pipe.PipelineError(f"Projet inconnu : {project_id}")
+    runners_cfg = pipe.load_runners()
+    runner = runners_cfg.get("runners", {}).get(lane)
+    if not runner:
+        raise pipe.PipelineError(f"Voie '{lane}' absente de config/runners.toml.")
+    argv_template = runner.get("argv") or []
+    if not argv_template:
+        raise pipe.PipelineError(f"Voie '{lane}' sans argv dans config/runners.toml.")
+    defaults = runners_cfg.get("defaults", {})
+    timeout = int(runner.get("timeout_s", defaults.get("timeout_s", 900)))
+
+    root, wt = _create_worktree(proj)
+    last_error = ""
+    try:
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            prompt = build_plan_prompt(objective, max_tickets, last_error)
+            argv = [str(a).replace("{prompt}", prompt) for a in argv_template]
+            log_path = pipe.COCKPIT_HOME / "logs" / project_id / wt.name / f"attempt-{attempt}.log"
+            extra_env = {
+                k: str(v).replace("{cockpit}", str(pipe.COCKPIT_HOME))
+                for k, v in (runner.get("env") or {}).items()
+            }
+            import costs
+
+            use_stats = runner.get("cost_source") == "opencode_stats" and not runner.get("usage_format")
+            before = costs.snapshot_opencode_stats() if use_stats else None
+            code, duration = pipe.run_worker(argv, wt, log_path, timeout, extra_env)
+            after = costs.snapshot_opencode_stats() if before is not None else None
+
+            if code != 0:
+                last_error = (
+                    f"Le worker a échoué (code {code}). Écris plan.json à la racine du répertoire courant."
+                )
+                continue
+
+            plan_path = wt / "plan.json"
+            if not plan_path.exists():
+                last_error = "plan.json est absent. Écris ce fichier à la racine du répertoire courant."
+                continue
+            try:
+                plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                last_error = "plan.json n'est pas un JSON valide."
+                continue
+            refusal = validate_plan(plan, wt, max_tickets)
+            if refusal:
+                last_error = refusal
+                continue
+
+            clean = [_clean_plan_ticket(item) for item in plan["tickets"]]
+            start = int(pipe.next_ticket_id(db, project_id)[2:])
+            ids = [f"T-{start + index:03d}" for index in range(len(clean))]
+            metrics = _metrics(runner, defaults, log_path, before, after)
+            created: list[str] = []
+            try:
+                for index, item in enumerate(clean):
+                    ticket_id = ids[index]
+                    depends_on = [ids[dep] for dep in item["depends_on"]]
+                    db.upsert_ticket(
+                        project_id,
+                        ticket_id,
+                        item["title"],
+                        milestone_id=None,
+                        priority=item["prio"],
+                        complexity=item["size"],
+                        state="DRAFT",
+                        owner="drafter",
+                        files_owned=item["files"],
+                        acceptance=item["accept"],
+                        contract=item["contract"],
+                        depends_on=depends_on,
+                    )
+                    created.append(ticket_id)
+                    run_fields: dict[str, Any] = {
+                        "attempt": attempt,
+                        "lane": lane,
+                        "provider": runner.get("provider", ""),
+                        "exit_code": code,
+                        "duration_s": round(duration, 1),
+                        "gate0": "DRAFT",
+                    }
+                    run_fields.update(metrics)
+                    db.record_run(project_id, ticket_id, **run_fields)
+                    db.add_event(
+                        project_id, ticket_id, "PLAN_CREATED", f"objectif : {objective[:200]}"
+                    )
+            except Exception as exc:  # création atomique : rien ne doit rester à moitié créé
+                _rollback_plan(db, project_id, created)
+                raise pipe.PipelineError(f"Création du plan impossible : {exc}") from exc
+
+            _print_plan_summary(ids, clean)
+            return [db.get_ticket(project_id, ticket_id) or {} for ticket_id in ids]
+
+        raise pipe.PipelineError(f"Aucun ticket créé : {last_error or 'plan invalide'}")
+    finally:
+        _remove_worktree(root, wt)
+
+
 def promote_ticket(db: CockpitDB, project_id: str, ticket_id: str) -> str:
     """DRAFT -> READY, ou BLOCKED si une dépendance n'est pas MERGED. Refus sinon."""
+    results = promote_tickets(db, project_id, [ticket_id])
+    return results[0][1]
+
+
+def promote_tickets(db: CockpitDB, project_id: str, ticket_ids: list[str]) -> list[tuple[str, str]]:
+    """Valide tous les ids (DRAFT) puis les promeut ; un seul refus annule toute la promotion."""
     pipe = _pipeline()
     if not db.get_project(project_id):
         raise pipe.PipelineError(f"Projet inconnu : {project_id}")
-    ticket = db.get_ticket(project_id, ticket_id)
-    if not ticket:
-        raise pipe.PipelineError(f"Ticket inconnu : {ticket_id}")
-    if ticket.get("state") != "DRAFT":
-        raise pipe.PipelineError(
-            f"{ticket_id} est à l'état {ticket.get('state')} (attendu : DRAFT) : promotion refusée."
-        )
-    depends = json.loads(ticket.get("depends_on_json") or "[]")
-    new_state = "READY"
-    if depends:
-        with db._connect() as conn:
-            placeholders = ",".join("?" for _ in depends)
-            rows = conn.execute(
-                f"SELECT id, state FROM tickets WHERE project_id = ? AND id IN ({placeholders})",
-                [project_id, *depends],
-            ).fetchall()
-        merged = {r["id"] for r in rows if r["state"] == "MERGED"}
-        if any(dep not in merged for dep in depends):
-            new_state = "BLOCKED"
-    db.update_ticket(project_id, ticket_id, state=new_state)
-    db.add_event(project_id, ticket_id, "PROMOTED", f"{ticket_id} : DRAFT -> {new_state}")
-    pipe.say(f"{ticket_id} : DRAFT -> {new_state}")
-    return new_state
+    unique: list[str] = []
+    for raw in ticket_ids:
+        ticket_id = (raw or "").strip()
+        if ticket_id and ticket_id not in unique:
+            unique.append(ticket_id)
+    if not unique:
+        raise pipe.PipelineError("Aucun identifiant de ticket fourni pour la promotion.")
+
+    tickets: list[dict[str, Any]] = []
+    for ticket_id in unique:
+        ticket = db.get_ticket(project_id, ticket_id)
+        if not ticket:
+            raise pipe.PipelineError(f"Ticket inconnu : {ticket_id}")
+        if ticket.get("state") != "DRAFT":
+            raise pipe.PipelineError(
+                f"{ticket_id} est à l'état {ticket.get('state')} (attendu : DRAFT) : promotion refusée."
+            )
+        tickets.append(ticket)
+
+    results: list[tuple[str, str]] = []
+    for ticket in tickets:
+        ticket_id = ticket["id"]
+        depends = json.loads(ticket.get("depends_on_json") or "[]")
+        new_state = "READY"
+        if depends:
+            with db._connect() as conn:
+                placeholders = ",".join("?" for _ in depends)
+                rows = conn.execute(
+                    f"SELECT id, state FROM tickets WHERE project_id = ? AND id IN ({placeholders})",
+                    [project_id, *depends],
+                ).fetchall()
+            merged = {r["id"] for r in rows if r["state"] == "MERGED"}
+            if any(dep not in merged for dep in depends):
+                new_state = "BLOCKED"
+        db.update_ticket(project_id, ticket_id, state=new_state)
+        db.add_event(project_id, ticket_id, "PROMOTED", f"{ticket_id} : DRAFT -> {new_state}")
+        pipe.say(f"{ticket_id} : DRAFT -> {new_state}")
+        results.append((ticket_id, new_state))
+    return results
