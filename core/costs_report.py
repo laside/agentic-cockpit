@@ -326,9 +326,14 @@ def build_report(
         f"hors ticket (pilotage, discussion) : sortie {_nombre(hors['sortie'])} · "
         f"cache relu {_nombre(hors['cache_read'])}"
     )
-    total_attribue = sum(t["sortie"] for t in par_ticket.values())
-    moyenne = total_attribue / len(fenetres) if fenetres else 0.0
-    lignes.append(f"MOYENNE tokens de sortie de l'architecte par ticket fusionné : {_nombre(moyenne)}")
+    avec_donnees = [t for t in par_ticket.values() if t["sortie"] > 0]
+    total_attribue = sum(t["sortie"] for t in avec_donnees)
+    moyenne = total_attribue / len(avec_donnees) if avec_donnees else 0.0
+    mot = "ticket" if len(avec_donnees) == 1 else "tickets"
+    lignes.append(
+        f"MOYENNE tokens de sortie de l'architecte par ticket fusionné : "
+        f"{_nombre(moyenne)} (sur {len(avec_donnees)} {mot} avec données)"
+    )
     lignes.append("")
     lignes.append("Le cache relu domine la facture de l'architecte (relu à chaque tour) : "
                   "l'économie passe par moins de tours de Claude (boucle auto, sous-agents).")
