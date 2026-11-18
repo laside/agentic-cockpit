@@ -304,8 +304,8 @@ def worker_prompt(feedback: str) -> str:
 
 
 def run_worker(argv: list[str], wt: Path, log_path: Path, timeout: int,
-               extra_env: dict[str, str] | None = None) -> tuple[int, float]:
-    """Lance le worker, recopie sa sortie à l'écran et dans le journal, borne sa durée."""
+               extra_env: dict[str, str] | None = None, *, stream: bool = True) -> tuple[int, float]:
+    """Lance le worker, écrit sa sortie dans le journal et, si `stream`, la recopie à l'écran."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     if shutil.which(argv[0]) is None:
         raise PipelineError(f"CLI introuvable pour cette voie : {argv[0]}")
@@ -322,8 +322,9 @@ def run_worker(argv: list[str], wt: Path, log_path: Path, timeout: int,
             for line in proc.stdout:
                 log.write(line)
                 log.flush()
-                sys.stdout.write(line)
-                sys.stdout.flush()
+                if stream:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
 
         reader = threading.Thread(target=pump, daemon=True)
         reader.start()

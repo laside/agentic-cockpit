@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -351,6 +352,21 @@ def _fresh_ticket_id(db: CockpitDB, project_id: str) -> str:
     return ticket_id
 
 
+def _print_failure_tail(log_path: Path, limit: int = 5) -> None:
+    """Écrit sur stderr les dernières lignes non vides du log, tronquées, sans le journal complet."""
+    try:
+        raw = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    lines = [line.rstrip("\r\n") for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return
+    kept = lines[-max(0, int(limit)):]
+    print(f"Dernieres lignes du log ({log_path}) :", file=sys.stderr)
+    for line in kept:
+        print(line[:300], file=sys.stderr)
+
+
 def _print_summary(ticket: dict[str, Any]) -> None:
     pipe = _pipeline()
     files = json.loads(ticket.get("files_owned_json") or "[]")
@@ -391,11 +407,13 @@ def draft_ticket(
 
     root, wt = _create_worktree(proj)
     last_error = ""
+    last_log: Path | None = None
     try:
         for attempt in range(1, max(1, max_attempts) + 1):
             prompt = build_prompt(objective, last_error)
             argv = [str(a).replace("{prompt}", prompt) for a in argv_template]
             log_path = pipe.COCKPIT_HOME / "logs" / project_id / wt.name / f"attempt-{attempt}.log"
+            last_log = log_path
             extra_env = {
                 k: str(v).replace("{cockpit}", str(pipe.COCKPIT_HOME))
                 for k, v in (runner.get("env") or {}).items()
@@ -404,7 +422,7 @@ def draft_ticket(
 
             use_stats = runner.get("cost_source") == "opencode_stats" and not runner.get("usage_format")
             before = costs.snapshot_opencode_stats() if use_stats else None
-            code, duration = pipe.run_worker(argv, wt, log_path, timeout, extra_env)
+            code, duration = pipe.run_worker(argv, wt, log_path, timeout, extra_env, stream=False)
             after = costs.snapshot_opencode_stats() if before is not None else None
 
             if code != 0:
@@ -457,6 +475,8 @@ def draft_ticket(
             _print_summary(ticket)
             return ticket
 
+        if last_log is not None:
+            _print_failure_tail(last_log)
         raise pipe.PipelineError(f"Aucun ticket créé : {last_error or 'brouillon invalide'}")
     finally:
         _remove_worktree(root, wt)
@@ -528,11 +548,13 @@ def plan_tickets(
 
     root, wt = _create_worktree(proj)
     last_error = ""
+    last_log: Path | None = None
     try:
         for attempt in range(1, MAX_ATTEMPTS + 1):
             prompt = build_plan_prompt(objective, max_tickets, last_error)
             argv = [str(a).replace("{prompt}", prompt) for a in argv_template]
             log_path = pipe.COCKPIT_HOME / "logs" / project_id / wt.name / f"attempt-{attempt}.log"
+            last_log = log_path
             extra_env = {
                 k: str(v).replace("{cockpit}", str(pipe.COCKPIT_HOME))
                 for k, v in (runner.get("env") or {}).items()
@@ -541,7 +563,7 @@ def plan_tickets(
 
             use_stats = runner.get("cost_source") == "opencode_stats" and not runner.get("usage_format")
             before = costs.snapshot_opencode_stats() if use_stats else None
-            code, duration = pipe.run_worker(argv, wt, log_path, timeout, extra_env)
+            code, duration = pipe.run_worker(argv, wt, log_path, timeout, extra_env, stream=False)
             after = costs.snapshot_opencode_stats() if before is not None else None
 
             if code != 0:
@@ -608,6 +630,8 @@ def plan_tickets(
             _print_plan_summary(ids, clean)
             return [db.get_ticket(project_id, ticket_id) or {} for ticket_id in ids]
 
+        if last_log is not None:
+            _print_failure_tail(last_log)
         raise pipe.PipelineError(f"Aucun ticket créé : {last_error or 'plan invalide'}")
     finally:
         _remove_worktree(root, wt)

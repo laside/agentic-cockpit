@@ -120,6 +120,10 @@ class DrafterTests(unittest.TestCase):
             code = pipeline.main(["ticket", "draft", "demo", "Objectif"])
         return code, out.getvalue(), err.getvalue()
 
+    def log_files(self) -> list[Path]:
+        root = self.home / "logs" / "demo"
+        return sorted(root.glob("*/attempt-*.log")) if root.exists() else []
+
     def assert_draft_refused(self, draft: dict | str, expected: str) -> None:
         code, _out, err = self.run_draft(draft)
         self.assertEqual(code, 1)
@@ -151,6 +155,65 @@ class DrafterTests(unittest.TestCase):
         run = self.db.last_run("demo", "T-001")
         self.assertIsNotNone(run)
         self.assertEqual(run["lane"], "deepseek_coder")
+
+    def test_run_worker_streams_by_default_and_only_logs_without_stream(self) -> None:
+        """run_worker affiche la sortie par défaut et ne l'écrit que dans le log avec stream=False."""
+        sentinel = "SENTINELLE-WORKER"
+        self.worker(f'echo "{sentinel}"\n')
+        log_default = self.base / "default.log"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code, _ = pipeline.run_worker(["bash", str(self.script), "p"], self.root, log_default, 30)
+        self.assertEqual(code, 0)
+        self.assertIn(sentinel, out.getvalue())
+        self.assertIn(sentinel, log_default.read_text(encoding="utf-8"))
+
+        log_quiet = self.base / "quiet.log"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code, _ = pipeline.run_worker(
+                ["bash", str(self.script), "p"], self.root, log_quiet, 30, stream=False
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn(sentinel, log_quiet.read_text(encoding="utf-8"))
+
+    def test_draft_success_keeps_worker_journal_out_of_stdout(self) -> None:
+        """Un brouillon réussi n'émet sur stdout que la synthèse, jamais le journal du worker."""
+        self.worker("echo 'SENTINELLE-DRAFT'\n" + self.write_draft(VALID_DRAFT))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = pipeline.main(["ticket", "draft", "demo", "Objectif"])
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("SENTINELLE-DRAFT", out.getvalue())
+        self.assertIn(VALID_DRAFT["title"], out.getvalue())
+        logs = self.log_files()
+        self.assertTrue(logs)
+        self.assertTrue(any("SENTINELLE-DRAFT" in p.read_text(encoding="utf-8") for p in logs))
+
+    def test_draft_failure_tail_is_bounded_to_five_truncated_lines(self) -> None:
+        """En échec, stderr ne reprend que 5 lignes non vides tronquées, le log reste complet."""
+        lines = [f"worker-line-{i:02d}" for i in range(1, 20)] + ["X" * 500]
+        self.worker("".join(f'echo "{line}"\n' for line in lines) + "exit 3\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = pipeline.main(["ticket", "draft", "demo", "Objectif"])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        error = err.getvalue()
+        self.assertIn("Dernieres lignes du log", error)
+        for line in lines[-5:]:
+            self.assertIn(line[:300], error)
+        self.assertNotIn(lines[-6], error)
+        self.assertIn("X" * 300, error)
+        self.assertNotIn("X" * 301, error)
+        logs = self.log_files()
+        self.assertTrue(logs)
+        self.assertTrue(
+            any(all(line in p.read_text(encoding="utf-8") for line in lines) for p in logs)
+        )
 
     def test_invalid_draft_retries_once_then_creates_no_ticket(self) -> None:
         """Un brouillon invalide déclenche une seule relance, avec l'erreur dans le prompt, puis aucun ticket."""
