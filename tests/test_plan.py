@@ -132,6 +132,10 @@ class PlanTests(unittest.TestCase):
             code = pipeline.main(["plan", "demo", "Objectif", *extra])
         return code, out.getvalue(), err.getvalue()
 
+    def log_files(self) -> list[Path]:
+        root = self.home / "logs" / "demo"
+        return sorted(root.glob("*/attempt-*.log")) if root.exists() else []
+
     def assert_plan_refused(self, plan: dict | str, expected: str) -> None:
         code, _out, err = self.run_plan(plan)
         self.assertEqual(code, 1)
@@ -176,6 +180,47 @@ class PlanTests(unittest.TestCase):
         self.assertIn("T-002 [M/P2] API", text)
         self.assertIn("dépend de T-001", text)
         self.assertIn("Total : 3 tickets DRAFT", text)
+
+    def test_plan_success_keeps_worker_journal_out_of_stdout(self) -> None:
+        """Un plan réussi n'émet sur stdout que le résumé compact et le total."""
+        plan = {"tickets": [
+            ticket("Socle", ["core/base.py"]),
+            ticket("API", ["core/api.py"], depends_on=[0]),
+        ]}
+        self.worker("echo 'SENTINELLE-PLAN'\n" + self.write_plan(plan))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = pipeline.main(["plan", "demo", "Objectif"])
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("SENTINELLE-PLAN", out.getvalue())
+        self.assertIn("Total : 2 tickets DRAFT", out.getvalue())
+        logs = self.log_files()
+        self.assertTrue(logs)
+        self.assertTrue(any("SENTINELLE-PLAN" in p.read_text(encoding="utf-8") for p in logs))
+
+    def test_plan_failure_tail_is_bounded_to_five_truncated_lines(self) -> None:
+        """En échec, stderr ne reprend que 5 lignes non vides tronquées, le log reste complet."""
+        lines = [f"plan-line-{i:02d}" for i in range(1, 20)] + ["Y" * 500]
+        self.worker("".join(f'echo "{line}"\n' for line in lines) + "exit 3\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = pipeline.main(["plan", "demo", "Objectif"])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        error = err.getvalue()
+        self.assertIn("Dernieres lignes du log", error)
+        for line in lines[-5:]:
+            self.assertIn(line[:300], error)
+        self.assertNotIn(lines[-6], error)
+        self.assertIn("Y" * 300, error)
+        self.assertNotIn("Y" * 301, error)
+        logs = self.log_files()
+        self.assertTrue(logs)
+        self.assertTrue(
+            any(all(line in p.read_text(encoding="utf-8") for line in lines) for p in logs)
+        )
 
     def test_one_invalid_ticket_refuses_whole_plan_with_one_retry_and_no_worktree(self) -> None:
         """Un seul ticket invalide suffit : code 1, aucun ticket, une relance, aucun worktree résiduel."""
