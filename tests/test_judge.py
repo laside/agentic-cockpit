@@ -452,7 +452,7 @@ class TestPipelineGate1Routing(unittest.TestCase):
             )
 
     def test_runners_toml_gate1_config(self) -> None:
-        cfg = pipeline.load_toml(ROOT / "config" / "runners.toml")
+        cfg = pipeline.load_toml(ROOT / "config" / "runners.example.toml")
         g1 = cfg.get("gate1", {})
         self.assertEqual(g1.get("backend"), "claude")
         self.assertEqual(g1.get("judge_model"), "haiku")

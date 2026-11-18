@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 COCKPIT_HOME="${COCKPIT_HOME:-$HOME/agentic-cockpit}"
-PROJECTS_TOML="${PROJECTS_TOML:-$COCKPIT_HOME/config/projects.toml}"
-PROJECT="${PROJECT:-mon-app}"
+_COCKPIT_CFG_DIR="${COCKPIT_CONFIG_DIR:-$HOME/.config/agentic-cockpit}"
+if [ -z "${PROJECTS_TOML:-}" ]; then
+  if [ -f "$_COCKPIT_CFG_DIR/projects.toml" ]; then
+    PROJECTS_TOML="$_COCKPIT_CFG_DIR/projects.toml"
+  elif [ -f "$COCKPIT_HOME/config/projects.toml" ]; then
+    PROJECTS_TOML="$COCKPIT_HOME/config/projects.toml"
+  else
+    PROJECTS_TOML="$COCKPIT_HOME/config/projects.example.toml"
+  fi
+fi
+PROJECT="${PROJECT:-cockpit}"
 
 if [ -f "$PROJECTS_TOML" ] && command -v python3 >/dev/null 2>&1; then
   eval "$(PROJECT="$PROJECT" PROJECTS_TOML="$PROJECTS_TOML" COCKPIT_HOME="$COCKPIT_HOME" python3 - << 'PY'
@@ -27,7 +36,7 @@ root = exp(cfg.get("root", ""), os.path.expanduser(f"~/projets/{p_id}"))
 wt_sess = exp(cfg.get("worktrees_sessions_dir", ""), f"{root}-worktrees")
 wt_tick = exp(cfg.get("worktrees_tickets_dir", ""), f"{root}-worktrees")
 branch = cfg.get("default_branch", "main")
-mirror = cfg.get("mirror_dir", f"/mnt/c/Projets/{p_id}")
+mirror = cfg.get("mirror_dir", "")
 ports = cfg.get("ports", {})
 sidecar_port = str(ports.get("sidecar", 8765))
 
@@ -41,11 +50,11 @@ print(f"export SIDECAR_PORT={shlex.quote(sidecar_port)}")
 PY
 )"
 else
-  export PROJECT_NAME="${PROJECT_NAME:-Mon-app}"
-  export PROJECT_ROOT="${PROJECT_ROOT:-$HOME/projets/mon-app}"
-  export WT_SESSIONS_DIR="${WT_SESSIONS_DIR:-$HOME/projets/mon-app-worktrees}"
-  export WT_TICKETS_DIR="${WT_TICKETS_DIR:-$HOME/projets/mon-app-worktrees}"
+  export PROJECT_NAME="${PROJECT_NAME:-$PROJECT}"
+  export PROJECT_ROOT="${PROJECT_ROOT:-$HOME/projets/$PROJECT}"
+  export WT_SESSIONS_DIR="${WT_SESSIONS_DIR:-$HOME/projets/$PROJECT-worktrees}"
+  export WT_TICKETS_DIR="${WT_TICKETS_DIR:-$HOME/projets/$PROJECT-worktrees}"
   export DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
-  export MIRROR_DIR="${MIRROR_DIR:-/mnt/c/Projets/mon-app}"
+  export MIRROR_DIR="${MIRROR_DIR:-}"
   export SIDECAR_PORT="${SIDECAR_PORT:-8765}"
 fi

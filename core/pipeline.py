@@ -17,6 +17,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,7 @@ CORE = Path(__file__).resolve().parent
 COCKPIT_HOME = Path(os.environ.get("COCKPIT_HOME", CORE.parent))
 sys.path.insert(0, str(CORE))
 
+import config_paths  # noqa: E402
 import costs  # noqa: E402
 import judge  # noqa: E402
 import judge_calibrate  # noqa: E402
@@ -78,16 +80,17 @@ def load_toml(path: Path) -> dict[str, Any]:
 
 
 def load_runners() -> dict[str, Any]:
-    cfg = load_toml(COCKPIT_HOME / "config" / "runners.toml")
+    path = config_paths.config_file("runners.toml", COCKPIT_HOME)
+    cfg = load_toml(path)
     if "runners" not in cfg:
-        raise PipelineError("config/runners.toml introuvable ou sans section [runners].")
+        raise PipelineError(f"{path} introuvable ou sans section [runners].")
     return cfg
 
 
 def project_commands(project_id: str, root: Path, workdir: Path) -> tuple[str, str]:
     """Retourne (lint_cmd, test_cmd) : .nexus/project.toml du projet, puis projects.toml, puis make."""
     local = load_toml(workdir / ".nexus" / "project.toml") or load_toml(root / ".nexus" / "project.toml")
-    central = load_toml(COCKPIT_HOME / "config" / "projects.toml").get("projects", {}).get(project_id, {})
+    central = load_toml(config_paths.config_file("projects.toml", COCKPIT_HOME)).get("projects", {}).get(project_id, {})
     has_make = (workdir / "Makefile").exists()
     lint = local.get("lint_cmd") or central.get("lint_cmd") or ("make lint" if has_make else "")
     test = local.get("test_cmd") or central.get("test_unit_cmd") or ("make test" if has_make else "")
@@ -124,6 +127,31 @@ def changed_files(wt: Path, base: str) -> list[str]:
 # ───────────────────────────── worktree & brief ─────────────────────────────
 
 _GIT_WORKTREE_LOCK = threading.Lock()
+
+
+def private_text_hits(text: str) -> list[str]:
+    """Numéros de ligne des motifs de la liste privée (forbidden-words.txt) présents dans le texte."""
+    path = config_paths.config_dir() / "forbidden-words.txt"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    hits = []
+    for idx, raw in enumerate(lines, start=1):
+        pat = raw.strip()
+        if pat and not pat.startswith("#") and re.search(pat, text, re.IGNORECASE):
+            hits.append(f"mot-interdit#{idx}")
+    return hits
+
+
+def stage_paths(wt: Path, paths: list[str]) -> None:
+    """Indexe ajouts, modifications et suppressions ; tolère une suppression déjà indexée (`git rm`)."""
+    present = [p for p in paths if (wt / p).exists()]
+    missing = [p for p in paths if not (wt / p).exists()]
+    if present:
+        sh(["git", "add", "-A", "--", *present], wt)
+    if missing:
+        sh(["git", "rm", "-q", "--cached", "--ignore-unmatch", "--", *missing], wt)
 
 
 def ensure_worktree(proj: dict[str, Any], ticket_id: str, parent_id: str = "") -> Path:
@@ -335,7 +363,7 @@ def gate1(ticket_brief: str, diff: str, cfg: dict[str, Any], timeout: int) -> tu
     # Sans réflexion, l'audit répond en quelques secondes ; avec, il peut dépasser plusieurs minutes.
     payload["think"] = bool(cfg.get("think", False))
     req = urllib.request.Request(
-        cfg.get("url", "http://192.168.0.10:11434").rstrip("/") + "/api/generate",
+        cfg.get("url", "http://127.0.0.1:11434").rstrip("/") + "/api/generate",
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
@@ -432,7 +460,7 @@ def _post_worker_gates(
             return "FAIL", msg
 
     # Indexe uniquement les fichiers du périmètre, puis audite le diff complet depuis la base.
-    sh(["git", "add", "--", *changed], wt)
+    stage_paths(wt, changed)
     diff = sh(["git", "diff", "--cached", base], wt).stdout
     gate1_status = "SKIPPED"
     gate1_notes: list[str] = []
@@ -770,13 +798,69 @@ def _child_ready_for_integration(db: CockpitDB, project_id: str, ticket: dict[st
     return False
 
 
+def _is_pid_alive(pid: Any) -> bool:
+    if pid is None:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def abandon_ticket(db: CockpitDB, project_id: str, ticket_id: str, reason: str = "") -> list[str]:
+    """Abandonne proprement un ticket ou un chantier (enfants puis parent) sans toucher à la branche principale."""
+    proj = db.get_project(project_id)
+    ticket = db.get_ticket(project_id, ticket_id)
+    if not proj:
+        raise PipelineError(f"Projet inconnu : {project_id}")
+    if not ticket:
+        raise PipelineError(f"Ticket inconnu : {ticket_id} (projet {project_id})")
+    if ticket["state"] in ("MERGED", "ABANDONED"):
+        raise PipelineError(f"{ticket_id} est déjà à l'état {ticket['state']} : abandon refusé.")
+
+    children = db.children(project_id, ticket_id)
+    targets = [*children, ticket]
+    for t in targets:
+        if _is_pid_alive(t.get("claimed_pid")):
+            raise PipelineError(
+                f"{t['id']} est réservé par un processus actif (pid {t['claimed_pid']}) : abandon refusé."
+            )
+
+    root = Path(proj["root_path"])
+    wt_base = Path(proj["wt_tickets_dir"])
+    motif = (reason or "").strip() or "abandon demandé"
+    abandoned: list[str] = []
+
+    for t in targets:
+        tid = t["id"]
+        wt = wt_base / tid
+        branch = f"feat/{tid}"
+        with _GIT_WORKTREE_LOCK:
+            if wt.exists():
+                sh(["git", "worktree", "remove", "--force", str(wt)], root, check=False)
+        sh(["git", "branch", "-D", branch], root, check=False)
+        db.release_locks(project_id, tid)
+        db.unclaim_ticket(project_id, tid)
+        db.update_ticket(project_id, tid, state="ABANDONED")
+        db.add_event(project_id, tid, "ABANDONED", motif)
+        abandoned.append(tid)
+
+    say(f"Abandon ({project_id}) : {', '.join(abandoned)} ({motif})")
+    return abandoned
+
+
 def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool = False) -> int:
     proj = db.get_project(project_id)
     ticket = db.get_ticket(project_id, ticket_id)
     if not proj or not ticket:
         raise PipelineError(f"Projet ou ticket inconnu : {project_id} / {ticket_id}")
 
-    unmerged_children = [c["id"] for c in db.children(project_id, ticket_id) if c.get("state") != "MERGED"]
+    unmerged_children = [
+        c["id"] for c in db.children(project_id, ticket_id) if c.get("state") not in ("MERGED", "ABANDONED")
+    ]
     if unmerged_children:
         raise PipelineError(
             f"{ticket_id} a des sous-tickets non MERGED ({', '.join(unmerged_children)}) : fusion refusée."
@@ -799,6 +883,12 @@ def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool =
     branch, default = f"feat/{ticket_id}", proj["default_branch"]
     target_branch = f"feat/{parent_id}" if parent_id else default
     target_wt = (Path(proj["wt_tickets_dir"]) / parent_id) if parent_id else root
+    central = load_toml(config_paths.config_file("projects.toml", COCKPIT_HOME)).get("projects", {}).get(
+        project_id, {}
+    )
+    merge_mode = str(central.get("merge_mode", "local")).strip() or "local"
+    remote = str(central.get("remote", "origin")).strip() or "origin"
+    github_mode = merge_mode == "github" and not parent_id
     lock_path = root / ".git" / "cockpit-merge.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = lock_path.open("a", encoding="utf-8")
@@ -822,11 +912,14 @@ def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool =
             raise PipelineError(f"{ticket_id} a des modifications non commitées dans son worktree.")
 
         # Porte d'intégration : on ramène la branche cible dans le ticket et on re-teste AVANT de fusionner.
-        res = sh(["git", "merge", "--no-edit", target_branch], wt, check=False)
+        integration_ref = f"{remote}/{default}" if github_mode else target_branch
+        if github_mode:
+            sh(["git", "fetch", remote], wt)
+        res = sh(["git", "merge", "--no-edit", integration_ref], wt, check=False)
         if res.returncode != 0:
             sh(["git", "merge", "--abort"], wt, check=False)
             db.add_event(project_id, ticket_id, "MERGE_CONFLICT", res.stdout[-300:])
-            raise PipelineError(f"Conflit entre {branch} et {target_branch} : fusion annulée, rien n'a changé.")
+            raise PipelineError(f"Conflit entre {branch} et {integration_ref} : fusion annulée, rien n'a changé.")
         lint_cmd, default_test = project_commands(project_id, root, wt)
         timeout = int(load_runners().get("defaults", {}).get("gate_timeout_s", 600))
         for label, cmd in (("lint", lint_cmd), ("tests", default_test), ("test du ticket", ticket.get("test_cmd") or "")):
@@ -836,7 +929,71 @@ def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool =
             if code != 0:
                 db.add_event(project_id, ticket_id, "INTEGRATION_FAIL", f"{label}: {cmd}")
                 raise PipelineError(f"Porte d'intégration refusée ({label}, `{cmd}`) :\n{sieve_test_output(out, 25)}")
-        say(f"{ticket_id} : porte d'intégration OK ({target_branch} intégré, lint et tests verts)")
+        say(f"{ticket_id} : porte d'intégration OK ({integration_ref} intégré, lint et tests verts)")
+
+        if github_mode:
+            gh = os.environ.get("COCKPIT_GH", "gh")
+            contract = (ticket.get("contract") or "").strip()[:4000]
+            modified = changed_files(wt, integration_ref)
+            body = contract + "\n\nFichiers modifiés :\n" + "\n".join(f"- {f}" for f in modified)
+            title = f"{ticket_id}: {ticket['title']}"
+            hits = private_text_hits(title + "\n" + body)
+            if hits:
+                db.add_event(project_id, ticket_id, "PR_PRIVACY_FAIL", ", ".join(hits))
+                raise PipelineError(
+                    f"{ticket_id} : le titre ou le contrat contient un motif privé ({', '.join(hits)}) : "
+                    "rien n'est poussé. Reformuler le ticket."
+                )
+            sh(["git", "push", "-u", remote, branch], wt)
+            view = sh([gh, "pr", "view", branch, "--json", "number,url,state"], wt, check=False, timeout=60)
+            try:
+                view_data = json.loads(view.stdout) if view.returncode == 0 else {}
+            except (ValueError, TypeError):
+                view_data = {}
+            if str(view_data.get("state", "OPEN")).upper() != "OPEN":
+                view_data = {}  # PR fermée ou déjà fusionnée : en ouvrir une nouvelle
+            if view_data:
+                pr_label = str(view_data.get("url") or "").strip()
+                if not pr_label:
+                    number = view_data.get("number")
+                    pr_label = f"PR #{number}" if number not in (None, "") else branch
+            else:
+                created = sh(
+                    [gh, "pr", "create", "--base", default, "--head", branch, "--title", title, "--body", body],
+                    wt,
+                )
+                pr_label = created.stdout.strip().splitlines()[-1] if created.stdout.strip() else branch
+            try:
+                # Juste après le push, GitHub peut ne pas avoir encore enregistré les checks.
+                for _ in range(12):
+                    checks = sh([gh, "pr", "checks", branch, "--watch", "--fail-fast"], wt, check=False, timeout=timeout)
+                    if "no checks reported" not in (checks.stdout + (checks.stderr or "")).lower():
+                        break
+                    time.sleep(10)
+            except subprocess.TimeoutExpired:
+                db.add_event(project_id, ticket_id, "PR_CHECKS_FAIL", f"délai {timeout}s dépassé")
+                raise PipelineError(f"{ticket_id} : gh pr checks a dépassé {timeout}s, rien n'est fusionné.")
+            if checks.returncode != 0:
+                detail = (checks.stdout or checks.stderr).strip()[-300:]
+                db.add_event(project_id, ticket_id, "PR_CHECKS_FAIL", detail)
+                raise PipelineError(f"{ticket_id} : checks GitHub en échec, rien n'est fusionné.\n{detail}")
+            merge_argv = [gh, "pr", "merge", branch, "--squash", "--delete-branch"]
+            author_email = sh(["git", "config", "user.email"], wt, check=False).stdout.strip()
+            if author_email:
+                # Sinon GitHub prend l'adresse du compte, qui peut être privée.
+                merge_argv += ["--author-email", author_email]
+            sh(merge_argv, wt)
+            sh(["git", "fetch", remote], root)
+            sh(["git", "merge", "--ff-only", f"{remote}/{default}"], root)
+            sh(["git", "worktree", "remove", "--force", str(wt)], root, check=False)
+            sh(["git", "branch", "-D", branch], root, check=False)
+            unblocked = db.complete_and_merge_ticket(project_id, ticket_id)
+            db.add_event(project_id, ticket_id, "MERGED", f"{pr_label} — débloque : " + (", ".join(unblocked) or "rien"))
+            # Branche principale protégée : la roadmap est régénérée mais jamais commitée.
+            db.export_markdown_roadmap(project_id, root / "docs" / "ROADMAP.md")
+            say(f"{ticket_id} : fusionné dans {default} via GitHub ({pr_label}). Débloqués : "
+                f"{', '.join(unblocked) or 'aucun'}")
+            return 0
 
         sh(["git", "merge", "--no-ff", branch, "-m", f"merge({ticket_id}): {ticket['title'][:72]}"], target_wt)
         sh(["git", "worktree", "remove", "--force", str(wt)], root, check=False)
@@ -897,7 +1054,7 @@ def cmd_ticket(db: CockpitDB, args: argparse.Namespace) -> int:
             active_children = [
                 c
                 for c in db.children(args.project, parent_id)
-                if c.get("state") != "MERGED" and c.get("id") != tid
+                if c.get("state") not in ("MERGED", "ABANDONED") and c.get("id") != tid
             ]
             if len(active_children) >= max_children:
                 raise PipelineError(
@@ -1267,6 +1424,11 @@ def main(argv: list[str] | None = None) -> int:
     p_note.add_argument("project", nargs="?", default=default_project)
     p_note.add_argument("text", nargs="?", default="")
 
+    p_abandon = sub.add_parser("abandon", help="Abandonne proprement un ticket ou un chantier")
+    p_abandon.add_argument("ticket")
+    p_abandon.add_argument("project", nargs="?", default=default_project)
+    p_abandon.add_argument("--reason", default="")
+
     args = parser.parse_args(argv)
     db = CockpitDB(DB_PATH)
     try:
@@ -1303,6 +1465,11 @@ def main(argv: list[str] | None = None) -> int:
             if not args.project:
                 raise PipelineError("Projet manquant : cockpit note T-xxx <projet> \"texte\"")
             return add_note(db, args.project, args.ticket, args.text)
+        if args.cmd == "abandon":
+            if not args.project:
+                raise PipelineError("Projet manquant : cockpit abandon T-xxx <projet>")
+            abandon_ticket(db, args.project, args.ticket, args.reason)
+            return 0
         if args.cmd == "ticket":
             if args.action == "add" and not args.title:
                 raise PipelineError("Titre manquant : cockpit ticket add <projet> \"titre\" --files a,b")

@@ -1,82 +1,178 @@
-# Agentic Cockpit V2
+# Agentic Cockpit
 
-Cockpit de développement agentique multi-projets : une file de tickets (SQLite), un pipeline qui confie
-chaque ticket à un agent en ligne de commande (headless) dans un worktree git isolé, des portes de
-contrôle déterministes, puis une fusion contrôlée. L'objectif est de dépenser le moins de tokens possible :
-tout ce qui peut être fait par un script (git, lint, tests, contrôle de périmètre, détection de secrets,
-choix de la voie) est fait sans LLM.
+Cockpit de développement agentique multi-projets : une file de tickets (SQLite), un pipeline qui
+confie chaque ticket à un agent en ligne de commande (headless) dans un worktree git isolé, des
+portes de contrôle déterministes, puis une fusion contrôlée. L'objectif est de dépenser le moins de
+tokens possible : tout ce qui peut être fait par un script (git, lint, tests, contrôle de périmètre,
+détection de secrets, choix de la voie) est fait sans LLM.
 
 ## Principe
-1. **Ticket** (`cockpit ticket add`) : titre, fichiers possédés, fichiers en lecture seule, contrat d'interface,
-   critères d'acceptation, commande de validation.
-2. **Run** (`cockpit run T-xxx <projet>`) : création du worktree et de la branche `feat/T-xxx`, compilation d'un
-   brief minimal (`.nexus_brief.md`), lancement du worker de la voie choisie par le Gouverneur de quotas.
-3. **Porte 0** (0 token) : périmètre des fichiers, secrets, lint, tests. Échec : le retour est renvoyé au worker
-   (tentatives bornées), puis escalade.
-4. **Porte 1** (optionnelle) : audit du diff par un modèle local (Ollama). Une Porte 1 statique
-   (`gatekeeper.check_tests_present`) existe sous forme de fonction : un diff de code doit toucher un test.
-5. **Revue puis fusion** (`cockpit merge T-xxx <projet> [--approve]`) : porte d'intégration (la branche principale
-   est fusionnée dans le ticket et les tests rejoués), puis fusion `--no-ff`, nettoyage, export de la roadmap.
-6. **`cockpit auto <projet>`** : boucle bornée qui exécute les tickets prêts sans conflit de fichiers
-   (`--dry-run` pour voir le lot sans rien lancer).
 
-## Travailler à plusieurs CLI
-Plusieurs agents peuvent collaborer sur un même projet sans messagerie :
-- **Architecte** : découpe les chantiers en tickets parents, `cockpit claim T-001 mon-projet --as claude`,
-  puis suit l'avancement avec `cockpit status mon-projet`.
-- **Chefs de chantier** : prennent leurs tickets avec `cockpit claim ... --as agy` (ou `deepseek`) et
-  découpent en enfants : `cockpit ticket add mon-projet "Titre" --files src/a.py --parent T-001`.
-- **Sous-agents headless** : exécutent les enfants avec `cockpit run T-002 mon-projet`, ou par lot avec
-  `cockpit auto mon-projet --parent T-001 --auto-merge --slots 2 --max-tickets 6` (`--dry-run` pour simuler).
-Cycle : `claim` -> `ticket add --parent` -> `run` / `auto --parent` -> `merge` des enfants -> `submit` du parent.
-`cockpit status mon-projet` remplace une messagerie ; `cockpit note T-001 mon-projet "texte"` consigne une
-information utile aux autres agents.
-Règle : seul l'architecte fusionne un chantier dans la branche principale.
+1. **Ticket** (`cockpit ticket add`) : titre, fichiers possédés (`FILES_OWNED`), fichiers en lecture
+   seule, contrat d'interface, critères d'acceptation, commande de validation.
+2. **Run** (`cockpit run T-xxx <projet>`) : création du worktree et de la branche `feat/T-xxx`,
+   compilation d'un brief minimal (`.nexus_brief.md`), lancement du worker de la voie choisie par le
+   Gouverneur de quotas.
+3. **Porte 0** (0 token) : périmètre des fichiers, secrets, lint, tests. Échec : le retour est renvoyé
+   au worker (tentatives bornées), puis escalade.
+4. **Porte 1** (optionnelle) : audit du diff par un modèle local. Une Porte 1 statique
+   (`gatekeeper.check_tests_present`) vérifie qu'un diff de code touche aussi un test.
+5. **Revue humaine** : un ticket peut être laissé à l'état `GATE2` ; `cockpit merge T-xxx <projet>`
+   exige alors `--approve` après relecture du diff.
+6. **Porte d'intégration puis fusion** (`cockpit merge T-xxx <projet> [--approve]`) : la branche
+   principale est ramenée dans la branche du ticket et lint/tests sont rejoués, puis la fusion est
+   effectuée (`--no-ff` en local, squash merge via GitHub en mode `github`), suivie du nettoyage et
+   de l'export de la roadmap.
+7. **`cockpit auto <projet>`** : boucle bornée qui exécute les tickets prêts sans conflit de
+   fichiers (`--dry-run` pour voir le lot sans rien lancer ; `--auto-merge` est refusé tant que le juge de
+   revue n'a pas une calibration récente et réussie, voir `cockpit judge-calibrate`).
 
-## Voies (config/runners.toml)
-Une entrée par voie : `deepseek_coder` (opencode), `agy_standard` / `agy_argon` (Antigravity CLI),
-`mistral_vibe`, `local_pc` (opencode sur Ollama local), `local_nas_coder`. Les voies `claude_haiku` et
-`claude_sonnet` sont des agents Claude headless : le Gouverneur ne les choisit jamais seul, on les demande
-explicitement avec `--lane` (`cockpit run T-001 mon-projet --lane claude_haiku`). Pour ajouter un LLM ou un
-CLI : copier un bloc et faire pointer une voie dessus.
+## Installation
 
-## Organisation du dépôt
-- `bin/cockpit` : lanceur unique (`open`, `run`, `merge`, `auto`, `ticket`, `events`, `relaunch`, `new-project`, ...).
-- `core/` : `pipeline.py` (pipeline), `pmo_db.py` (SQLite, Gouverneur de quotas, DAG de tickets),
-  `context_compiler.py` (briefs), `gatekeeper.py` (portes), `scheduler.py` (lots sans conflit),
-  `costs.py` (coûts réels via `opencode stats`), `fixer.py` (correcteur lint/typage par modèle local, non branché).
-- `config/` : `projects.toml` (registre des projets, ports), `runners.toml` (voies), `lanes.yaml`.
-- `scripts/` : lanceurs et utilitaires (`new-project.sh`, `relaunch.sh`, `dispatch-ticket.sh`, `git-relay.sh`).
-- `tui/pmo_dashboard.py` : tableau de bord terminal. `layouts/` : disposition Zellij.
-- `prompts/`, `templates/` : consignes des agents et modèles de nouveau projet.
-- `tests/` : tests `unittest` (stdlib), sans réseau ni LLM.
+Prérequis :
 
-## Démarrage rapide
+- `git` et `bash` ;
+- Python 3.11 ou plus récent (stdlib uniquement, compatible 3.12) ;
+- Zellij **optionnel** : nécessaire seulement au tableau de bord et au lanceur multi-sessions ;
+- les CLI des workers que vous activez dans `config/runners.toml` (par exemple `opencode`, `agy`,
+  `vibe`, ou un serveur Ollama local).
+
 ```bash
 git clone <ce dépôt> ~/agentic-cockpit
 cd ~/agentic-cockpit
-python3 -B -m unittest discover -s tests      # tous les tests
-bin/cockpit new-project mon-projet            # crée un projet (dépôt, règles, registre des ports)
-bin/cockpit ticket add mon-projet "Titre" --files src/a.py,tests/test_a.py --accept "..."
-bin/cockpit run T-001 mon-projet --no-gate1
-bin/cockpit merge T-001 mon-projet --approve
+python3 -B -m unittest discover -s tests      # tous les tests, sans réseau ni LLM
+bin/cockpit new-project demo                  # crée un projet et l'enregistre
+bin/cockpit ticket add demo "Titre" --files src/a.py,tests/test_a.py --accept "..."
+bin/cockpit run T-001 demo --no-gate1
+bin/cockpit merge T-001 demo --approve
 ```
-Prérequis : Python 3.11+ (stdlib seule), git, bash. Selon les voies utilisées : `opencode`, `agy`, `vibe`,
-Ollama, Zellij. Le tableau de bord, le lanceur Zellij et le script `relaunch.sh` supposent Zellij.
+
+Le code lit `COCKPIT_HOME` (défaut : `~/agentic-cockpit`).
+
+## Configuration
+
+La configuration vit **hors du dépôt**, dans une surcouche :
+
+- `$COCKPIT_CONFIG_DIR` s'il est défini, sinon `~/.config/agentic-cockpit` ;
+- à défaut, `<COCKPIT_HOME>/config/` (compatibilité) ;
+- à défaut, l'exemple livré `<stem>.example<suffix>`.
+
+Pour démarrer, copiez les exemples fournis :
+
+```bash
+mkdir -p ~/.config/agentic-cockpit
+cp config/projects.example.toml ~/.config/agentic-cockpit/projects.toml
+cp config/runners.example.toml  ~/.config/agentic-cockpit/runners.toml
+```
+
+- `projects.toml` : registre des projets, chemins de worktrees, branche par défaut, ports, et
+  `merge_mode` (`"local"` par défaut, ou `"github"`).
+- `runners.toml` : une entrée par voie (commande `argv`, quotas, délais, Porte 1 statique).
+- `config/lanes.yaml` : budgets et seuils du Gouverneur de quotas.
+- `forbidden-words.txt` : liste privée de motifs (une expression régulière par ligne, `#` pour les
+  commentaires) lue par `cockpit privacy-check`. Placez-la dans la surcouche
+  (`~/.config/agentic-cockpit/forbidden-words.txt` ou `$COCKPIT_CONFIG_DIR/forbidden-words.txt`) :
+  elle ne doit jamais être commitée.
+
+Les secrets se saisissent avec `cockpit secret <NOM_DE_CLE>` ; ils sont stockés hors dépôt et
+ignorés par git.
+
+## Commandes
+
+Toutes les commandes passent par le lanceur unique `bin/cockpit` :
+
+- `cockpit ticket add <projet> "Titre" --files a.py,tests/test_a.py --accept "..."` : crée un ticket.
+- `cockpit run T-xxx <projet> [--lane <voie>] [--no-gate1]` : exécute un ticket (worker, Porte 0,
+  Porte 1, commit).
+- `cockpit auto <projet> [--dry-run] [--auto-merge] [--parent T-xxx] [--slots N] [--max-tickets N]` :
+  boucle autonome sur la file.
+- `cockpit merge T-xxx <projet> [--approve]` : porte d'intégration puis fusion et nettoyage.
+- `cockpit claim T-xxx <projet> --as claude|agy|deepseek` : réserve un ticket pour un chantier
+  interactif.
+- `cockpit submit T-xxx <projet>` / `cockpit release T-xxx <projet>` : soumet le worktree aux portes
+  ou relâche le ticket vers `READY`.
+- `cockpit status <projet>` : état synthétique du projet (0 token).
+- `cockpit note T-xxx <projet> "texte"` : consigne une note utile aux autres agents.
+- `cockpit costs <projet> [--since AAAA-MM-JJ]` : rapport des coûts workers et architecte.
+- `cockpit judge-calibrate [--runs N] [--json chemin]` : calibre le juge de revue sur un jeu de cas.
+- `cockpit abandon T-xxx <projet> [--reason "..."]` : abandonne proprement un ticket ou un chantier.
+- `cockpit privacy-check [--repo <chemin>] [--range A..B] [--generic]` : garde de confidentialité.
+- `cockpit install-hooks` : installe le hook git `pre-push` de confidentialité.
+
+`cockpit help` affiche la liste complète.
+
+## Multi-projets
+
+`cockpit new-project <projet> [chemin] [port]` initialise un dépôt, ses règles, son `Makefile`, ses
+worktrees et son entrée dans `projects.toml` (avec contrôle des collisions de ports). Chaque projet a
+sa propre session Zellij `cockpit-<projet>` : `cockpit open <projet>` (ou `cockpit switch <projet>`)
+bascule d'un projet à l'autre sans fermer les sessions en arrière-plan. Un même projet peut être
+travaillé par plusieurs agents via `claim` / `submit` / `release`.
+
+## Flux GitHub
+
+Pour un projet dont `projects.toml` contient `merge_mode = "github"` :
+
+1. le worktree du ticket est poussé sur la branche `feat/T-xxx` ;
+2. une pull request est créée (ou une PR ouverte est réutilisée) vers la branche par défaut ;
+3. les checks CI sont attendus (`gh pr checks`) ;
+4. la PR est fusionnée en **squash merge** avec suppression de la branche, puis la branche locale
+   est mise à jour en fast-forward.
+
+La branche `main` reste protégée : le pipeline ne pousse jamais directement dessus et la roadmap est
+régénérée sans être commitée. Côté GitHub, activez la protection de `main` et exigez les checks CI
+avant fusion. En mode `local` (défaut), la fusion se fait en `--no-ff` depuis le dépôt racine.
+
+## Économie de tokens
+
+Tout ce qui peut être décidé sans LLM l'est : périmètre `FILES_OWNED`, détection de secrets, lint,
+tests, Porte 1 statique, choix de la voie, intégration et fusion. Les commandes `ticket`, `status`,
+`costs`, `events`, `privacy-check` et `install-hooks` ne consomment aucun token. Chaque run
+enregistre les tokens (entrée, sortie, cache) lus dans la sortie JSON du worker. `cockpit costs
+<projet> [--since ...] [--transcript <journal.jsonl>]` sépare le coût des workers de celui de
+l'architecte. Les unités ne sont jamais mélangées : euros mesurés (API payante), équivalent API
+(abonnement), tokens seuls (voie sans coût exposé).
+
+## Sécurité
+
+- **R7** : ne jamais lire ni committer `.env`, `secrets/`, `*.key` ou `*.pem`. La Porte 0, le relais
+  git et `cockpit privacy-check` refusent ces fichiers.
+- **Périmètre `FILES_OWNED`** : un ticket ne peut créer ou modifier que les fichiers déclarés ; tout
+  débordement est signalé et renvoyé au worker.
+- **Hook `pre-push`** : `cockpit install-hooks` installe un hook qui exécute `cockpit privacy-check`
+  sur la plage de commits poussée (fichiers suivis, adresses e-mail et IP privées, mots interdits).
+  Installez-le dans chaque dépôt avant de pousser.
+
+## Organisation du dépôt
+
+- `bin/cockpit` : lanceur unique (`open`, `run`, `merge`, `auto`, `ticket`, `claim`, `submit`,
+  `release`, `status`, `costs`, `judge-calibrate`, `abandon`, `privacy-check`, `install-hooks`,
+  `new-project`, `events`, `note`, `relaunch`, ...).
+- `core/` : `pipeline.py` (pipeline), `pmo_db.py` (SQLite, Gouverneur de quotas, DAG de tickets),
+  `context_compiler.py` (briefs), `gatekeeper.py` (portes), `scheduler.py` (lots sans conflit),
+  `costs.py` et `costs_report.py` (coûts), `judge.py` et `judge_calibrate.py` (revue),
+  `config_paths.py` (résolution de la surcouche), `fixer.py` (correcteur lint/typage, non branché).
+- `config/` : exemples `projects.example.toml` et `runners.example.toml`, `lanes.yaml`.
+- `scripts/` : `new-project.sh`, `relaunch.sh`, `dispatch-ticket.sh`, `git-relay.sh`,
+  `privacy-check.py`, `install-hooks.sh`, `cockpit-env.sh`.
+- `tui/pmo_dashboard.py` : tableau de bord terminal ; `layouts/` : disposition Zellij.
+- `prompts/`, `templates/` : consignes des agents et modèles de nouveau projet.
+- `tests/` : tests `unittest` (stdlib), sans réseau ni LLM.
 
 ## Points d'attention
-- L'adresse du nœud Ollama « NAS » (`192.168.0.10`) est un **exemple** : à remplacer dans `config/runners.toml`
-  et `config/projects.toml`.
-- Les chemins de miroir `/mnt/c/Projets/...` supposent WSL ; adaptez-les.
-- Ne jamais committer `.env`, `secrets/`, `*.key`, `*.pem` : le garde-fou de la Porte 0 et le relais git les refusent.
-- Les petits modèles locaux (7 à 8 milliards de paramètres) ne sont **pas** fiables comme juges de Porte 1 :
-  ils répondent « PASS » à tout. Mesurer sur un diff volontairement mauvais avant de s'y fier.
-- `opencode stats` est un compteur global : le coût mesuré par ticket est faussé si d'autres runs opencode
-  tournent en parallèle. La voie agy n'a pas de mesure de coût.
-- Pas de licence pour l'instant : aucun droit de réutilisation n'est accordé tant qu'elle n'est pas ajoutée.
+
+- Les chemins de worktrees des exemples supposent `~/agentic-cockpit-worktrees` ; adaptez-les dans
+  `projects.toml`.
+- Les petits modèles locaux (7 à 8 milliards de paramètres) ne sont pas fiables comme juges de
+  Porte 1 : ils répondent souvent « PASS » à tout. Mesurez avec `cockpit judge-calibrate` avant de
+  vous y fier.
+- La boucle `cockpit auto` est couverte par des tests unitaires (faux worker) et des essais
+  supervisés ; commencez par `--dry-run`.
+- Pas de licence pour l'instant : aucun droit de réutilisation n'est accordé tant qu'elle n'est pas
+  ajoutée.
 
 ## État
-Pipeline, portes, ordonnanceur, suivi des coûts et tableau de bord fonctionnent et sont couverts par des tests.
-La Porte 1 statique est branchée dans `run_ticket` via l'option `require_tests` (un diff de code doit toucher
-un test). Le Sprint Fixer n'est pas branché. La boucle `cockpit auto` n'a été éprouvée qu'avec des tests
-unitaires (faux worker) et en essais supervisés.
+
+Pipeline, portes, ordonnanceur, suivi des coûts, confidentialité et tableau de bord fonctionnent et
+sont couverts par des tests. La Porte 1 statique est branchée dans `run_ticket` via l'option
+`require_tests` (un diff de code doit toucher un test). Le Sprint Fixer n'est pas branché.

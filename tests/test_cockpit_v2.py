@@ -32,15 +32,15 @@ class TestAgenticCockpitV2(unittest.TestCase):
         self.assertTrue(pmo_db.is_secret_or_forbidden_path(".env"))
         self.assertTrue(pmo_db.is_secret_or_forbidden_path("backend/.env.local"))
         self.assertTrue(pmo_db.is_secret_or_forbidden_path("secrets/db_url"))
-        self.assertTrue(pmo_db.is_secret_or_forbidden_path("/mnt/c/Projets/mon-app/secrets/exclusion.key"))
+        self.assertTrue(pmo_db.is_secret_or_forbidden_path("/mnt/c/Projets/demo/secrets/exclusion.key"))
         self.assertTrue(pmo_db.is_secret_or_forbidden_path("../x.py"))
         self.assertTrue(pmo_db.is_secret_or_forbidden_path("a/../../x.py"))
         self.assertTrue(pmo_db.is_secret_or_forbidden_path("/etc/passwd"))
         self.assertFalse(pmo_db.is_secret_or_forbidden_path(".env.example"))
         self.assertFalse(pmo_db.is_secret_or_forbidden_path("backend/src/app/api.py"))
-        self.assertFalse(pmo_db.is_secret_or_forbidden_path("backend/src/app/api.py"))
+        self.assertFalse(pmo_db.is_secret_or_forbidden_path("backend/src/demo/api.py"))
 
-        collisions = pmo_db.validate_projects_ports(COCKPIT_ROOT / "config/projects.toml")
+        collisions = pmo_db.validate_projects_ports(COCKPIT_ROOT / "config/projects.example.toml")
         self.assertEqual(collisions, [], f"Collisions de ports détectées : {collisions}")
 
     def test_01b_acquire_locks_normalization_and_no_lock_stealing(self) -> None:
@@ -126,14 +126,14 @@ class TestAgenticCockpitV2(unittest.TestCase):
         self.assertLessEqual(len(sieved.splitlines()), 10)
 
         ok, unauth, sec = gatekeeper.verify_worktree_scope(
-            modified_files=["backend/src/app/api.py", ".env"],
-            allowed_files=["backend/src/app/api.py"],
+            modified_files=["backend/src/demo/api.py", ".env"],
+            allowed_files=["backend/src/demo/api.py"],
         )
         self.assertFalse(ok)
         self.assertEqual(sec, [".env"])
 
     def test_05_new_project_script_and_rollback(self) -> None:
-        real_projects_toml = COCKPIT_ROOT / "config/projects.toml"
+        real_projects_toml = COCKPIT_ROOT / "config/projects.example.toml"
         real_toml_before = real_projects_toml.read_text(encoding="utf-8")
         tmp_projects_toml = self.tmp_path / "projects.toml"
         tmp_projects_toml.write_text(real_toml_before, encoding="utf-8")
@@ -197,9 +197,8 @@ class TestAgenticCockpitV2(unittest.TestCase):
         self.assertNotEqual(res_collision.returncode, 0)
         self.assertEqual(tmp_projects_toml.read_text(encoding="utf-8"), toml_after_second)
 
-        # 7. Le vrai config/projects.toml n'a pas changé
+        # 7. Le fichier d'exemple config/projects.example.toml n'a pas changé
         self.assertEqual(real_projects_toml.read_text(encoding="utf-8"), real_toml_before)
-
 
 
 if __name__ == "__main__":

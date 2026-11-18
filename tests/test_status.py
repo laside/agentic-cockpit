@@ -33,7 +33,7 @@ class TestStatusAndNeighbors(unittest.TestCase):
         (self.repo / "a.py").write_text("def fa() -> int:\n    return 1\n", encoding="utf-8")
 
         subprocess.run(["git", "init", "-b", "main"], cwd=self.repo, check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@cockpit.local"], cwd=self.repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@cockpit.local"], cwd=self.repo, check=True)  # privacy-check: allow
         subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo, check=True)
         subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
         subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo, check=True, capture_output=True)
