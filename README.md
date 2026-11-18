@@ -82,6 +82,9 @@ ignorés par git.
 Toutes les commandes passent par le lanceur unique `bin/cockpit` :
 
 - `cockpit ticket add <projet> "Titre" --files a.py,tests/test_a.py --accept "..."` : crée un ticket.
+- `cockpit ticket draft <projet> "Objectif" [--lane L]` : fait rédiger un ticket `DRAFT` par un worker.
+- `cockpit ticket promote T-xxx <projet>` : passe un `DRAFT` à `READY` (ou `BLOCKED` si une
+  dépendance n'est pas `MERGED`).
 - `cockpit run T-xxx <projet> [--lane <voie>] [--no-gate1]` : exécute un ticket (worker, Porte 0,
   Porte 1, commit).
 - `cockpit auto <projet> [--dry-run] [--auto-merge] [--parent T-xxx] [--slots N] [--max-tickets N]` :
@@ -102,6 +105,16 @@ Toutes les commandes passent par le lanceur unique `bin/cockpit` :
 - `cockpit install-hooks` : installe le hook git `pre-push` de confidentialité.
 
 `cockpit help` affiche la liste complète.
+
+## Rédaction assistée de tickets
+
+`cockpit ticket draft <projet> "Objectif" [--lane L]` crée un worktree jetable détaché de
+`origin/<branche par défaut>` et laisse le worker de la voie explorer le dépôt. Le worker écrit
+`draft.json` (`title`, `size`, `prio`, `files`, `contract`, `accept`) ; la validation est mécanique
+(chemins, 8 fichiers maximum, taille, priorité, contrat de 1500 caractères maximum, acceptation non
+vide, confidentialité). En cas de refus, une seule relance reçoit l'erreur dans son prompt, puis
+aucun ticket n'est créé. Un brouillon valide devient un ticket `DRAFT` : `cockpit auto` et
+`cockpit run` l'ignorent jusqu'à `cockpit ticket promote T-xxx <projet>`.
 
 ## Multi-projets
 
