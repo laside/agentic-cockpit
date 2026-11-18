@@ -257,6 +257,21 @@ class MergeGithubTests(unittest.TestCase):
         self.assertEqual(pipeline.merge_ticket(self.db, "demo", "T-013", approve=True), 0)
         self.assertNotIn("PRIVACY_LEAK", [e["kind"] for e in self.db.recent_events("demo", 20)])
 
+    def test_commit_identity_leaks_accepts_noreply_github_address(self) -> None:
+        git(self.root, "config", "user.email", "noreply@github.com")
+        (self.root / "identite.txt").write_text("1\n", encoding="utf-8")
+        git(self.root, "add", "identite.txt")
+        git(self.root, "commit", "-q", "-m", "identite noreply")
+        self.assertEqual(pipeline.commit_identity_leaks(self.root, "HEAD"), [])
+
+    def test_commit_identity_leaks_flags_unknown_github_email(self) -> None:
+        git(self.root, "config", "user.email", "inconnu@github.com")
+        (self.root / "identite.txt").write_text("2\n", encoding="utf-8")
+        git(self.root, "add", "identite.txt")
+        git(self.root, "commit", "-q", "-m", "identite inconnue")
+        leaks = pipeline.commit_identity_leaks(self.root, "HEAD")
+        self.assertIn("author-email: email-non-autorise", leaks)
+
     def test_private_word_in_contract_blocks_push_and_pr(self) -> None:
         (self.overlay / "forbidden-words.txt").write_text("# liste\nmotprive\n", encoding="utf-8")
         self.prepare_ticket("T-012", "Contrat privé", contract="Ne pas citer MotPrive ici")

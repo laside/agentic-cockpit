@@ -147,6 +147,7 @@ def private_text_hits(text: str) -> list[str]:
 ALLOWED_COMMIT_EMAIL_DOMAINS = frozenset(
     {"users.noreply.github.com", "noreply.github.com", "example.com", "example.org", "localhost", "anthropic.com"}
 )
+ALLOWED_COMMIT_EMAILS = frozenset({"noreply@github.com"})
 
 
 def commit_identity_leaks(repo: Path, ref: str) -> list[str]:
@@ -157,7 +158,10 @@ def commit_identity_leaks(repo: Path, ref: str) -> list[str]:
         return []
     leaks = []
     for label, value in zip(("author", "author-email", "committer", "committer-email"), parts):
-        if label.endswith("email") and value.rsplit("@", 1)[-1].lower() not in ALLOWED_COMMIT_EMAIL_DOMAINS:
+        if label.endswith("email") and (
+            value.lower() not in ALLOWED_COMMIT_EMAILS
+            and value.rsplit("@", 1)[-1].lower() not in ALLOWED_COMMIT_EMAIL_DOMAINS
+        ):
             leaks.append(f"{label}: email-non-autorise")
         leaks += [f"{label}: {h}" for h in private_text_hits(value)]
     return leaks
