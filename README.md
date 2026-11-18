@@ -93,6 +93,7 @@ Toutes les commandes passent par le lanceur unique `bin/cockpit` :
   ou relâche le ticket vers `READY`.
 - `cockpit sync <projet>` : clôt les tickets `PR_OPEN` dont la PR est fusionnée (0 token).
 - `cockpit status <projet>` : état synthétique du projet (0 token) ; lance `sync` au préalable.
+- `cockpit brief <projet>` : brief de reprise en 30 lignes maximum (branche, dernier commit, tickets, prochain ticket, événements, coût du jour), lu uniquement dans la base et le git local, sans réseau.
 - `cockpit note T-xxx <projet> "texte"` : consigne une note utile aux autres agents.
 - `cockpit costs <projet> [--since AAAA-MM-JJ]` : rapport des coûts workers et architecte.
 - `cockpit judge-calibrate [--runs N] [--json chemin]` : calibre le juge de revue sur un jeu de cas.
