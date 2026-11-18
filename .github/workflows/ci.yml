@@ -27,3 +27,29 @@ jobs:
 
       - name: Privacy check
         run: python3 scripts/privacy-check.py --generic
+
+  notify:
+    needs: [tests]
+    if: github.event_name == 'pull_request' && needs.tests.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    timeout-minutes: 5
+    continue-on-error: true
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Commenter la PR (tests verts)
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          body="$(mktemp)"
+          {
+            echo '<!-- cockpit-ci-tests-passed -->'
+            echo '## Tests verts'
+            echo ''
+            echo "La CI est passée : ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > "$body"
+          gh pr comment "$PR_NUMBER" --edit-last --create-if-none --body-file "$body"
