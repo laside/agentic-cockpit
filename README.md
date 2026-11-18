@@ -171,7 +171,9 @@ tests, Porte 1 statique, choix de la voie, intégration et fusion. Les commandes
 enregistre les tokens (entrée, sortie, cache) lus dans la sortie JSON du worker. `cockpit costs
 <projet> [--since ...] [--transcript <journal.jsonl>]` sépare le coût des workers de celui de
 l'architecte. Les unités ne sont jamais mélangées : euros mesurés (API payante), équivalent API
-(abonnement), tokens seuls (voie sans coût exposé).
+(abonnement), tokens seuls (voie sans coût exposé). La ligne `MOYENNE` divise la sortie attribuée
+par le nombre de tickets fusionnés ayant réellement reçu des tokens de sortie du journal ; un ticket
+fusionné sans données est exclu du dénominateur (N=0 donne une moyenne à 0).
 
 ## Sécurité
 

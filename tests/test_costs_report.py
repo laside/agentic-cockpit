@@ -187,14 +187,59 @@ class CostsReportTests(unittest.TestCase):
         rapport = build_report("demo", self.db_path, transcripts=[journal])
         self.assertIn("hors ticket (pilotage, discussion) : sortie 100 · cache relu 50", rapport)
 
-    def test_moyenne_par_ticket_fusionne(self) -> None:
+    def test_moyenne_divise_par_tickets_avec_donnees(self) -> None:
         self._deux_tickets_fusionnes()
         journal = _ecrit_journal(
             self.root / "session.jsonl",
             [_message("msg-1", "2026-03-01T10:30:00Z", output=100)],
         )
         rapport = build_report("demo", self.db_path, transcripts=[journal])
-        self.assertIn("MOYENNE tokens de sortie de l'architecte par ticket fusionné : 50", rapport)
+        self.assertIn(
+            "MOYENNE tokens de sortie de l'architecte par ticket fusionné : "
+            "100 (sur 1 ticket avec données)",
+            rapport,
+        )
+
+    def test_moyenne_deux_tickets_avec_donnees(self) -> None:
+        self._deux_tickets_fusionnes()
+        journal = _ecrit_journal(
+            self.root / "session.jsonl",
+            [
+                _message("msg-1", "2026-03-01T10:30:00Z", output=100),
+                _message("msg-2", "2026-03-01T11:30:00Z", output=200),
+            ],
+        )
+        rapport = build_report("demo", self.db_path, transcripts=[journal])
+        self.assertIn(
+            "MOYENNE tokens de sortie de l'architecte par ticket fusionné : "
+            "150 (sur 2 tickets avec données)",
+            rapport,
+        )
+
+    def test_moyenne_ticket_sans_donnees_exclu_du_denominateur(self) -> None:
+        self._deux_tickets_fusionnes()
+        journal = _ecrit_journal(
+            self.root / "session.jsonl",
+            [_message("msg-1", "2026-03-01T10:30:00Z", output=100)],
+        )
+        rapport = build_report("demo", self.db_path, transcripts=[journal])
+        self.assertIn("T-2 Second ticket de test : sortie 0", rapport)
+        self.assertIn("sur 1 ticket avec données", rapport)
+        self.assertNotIn("sur 2 tickets avec données", rapport)
+
+    def test_moyenne_sans_ticket_avec_donnees(self) -> None:
+        self._deux_tickets_fusionnes()
+        journal = _ecrit_journal(
+            self.root / "session.jsonl",
+            [_message("msg-1", "2026-03-01T14:00:00Z", output=100)],
+        )
+        rapport = build_report("demo", self.db_path, transcripts=[journal])
+        self.assertIn(
+            "MOYENNE tokens de sortie de l'architecte par ticket fusionné : "
+            "0 (sur 0 tickets avec données)",
+            rapport,
+        )
+        self.assertIn("hors ticket (pilotage, discussion) : sortie 100", rapport)
 
     def test_aucun_transcript_sans_erreur(self) -> None:
         rapport = self._rapport()
