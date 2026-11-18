@@ -106,8 +106,21 @@ Toutes les commandes passent par le lanceur unique `bin/cockpit` :
 - `cockpit abandon T-xxx <projet> [--reason "..."]` : abandonne proprement un ticket ou un chantier.
 - `cockpit privacy-check [--repo <chemin>] [--range A..B] [--generic]` : garde de confidentialité.
 - `cockpit install-hooks` : installe le hook git `pre-push` de confidentialité.
+- `cockpit lessons <projet> [--apply] [--db chemin] [--rules chemin] [--min N]` : propose des règles
+  courtes à partir des échecs récurrents, sans token.
 
 `cockpit help` affiche la liste complète.
+
+### Leçons apprises (`cockpit lessons`)
+
+`cockpit lessons <projet> [--apply] [--db chemin] [--rules chemin] [--min N]` analyse les événements
+`GATE0_FAIL`, `GATE1_FAIL`, `INTEGRATION_FAIL` et `PR_PRIVACY_FAIL` de la base (`--db`), regroupe les
+motifs revenant au moins 3 fois (seuil réglable par `--min N`) et propose des règles courtes. Sans
+`--apply`, la commande se contente d'afficher les propositions : elle n'écrit rien. `--apply` insère
+les règles de façon idempotente dans la section bornée à 20 règles maximum, sans doublon, du fichier
+cible (`templates/core.md` par défaut, ou `--rules chemin`), délimitée exactement par les marqueurs
+`<!-- BEGIN COCKPIT LESSONS -->` et `<!-- END COCKPIT LESSONS -->`. La commande ne consomme aucun
+token et n'écrit rien sans `--apply`.
 
 ## Rédaction assistée de tickets
 
@@ -181,7 +194,7 @@ erreur réseau ou un `gh` absent laisse tout inchangé. `cockpit status` appelle
 
 Tout ce qui peut être décidé sans LLM l'est : périmètre `FILES_OWNED`, détection de secrets, lint,
 tests, Porte 1 statique, choix de la voie, intégration et fusion. Les commandes `ticket`, `status`,
-`costs`, `events`, `privacy-check` et `install-hooks` ne consomment aucun token. Chaque run
+`costs`, `events`, `lessons`, `privacy-check` et `install-hooks` ne consomment aucun token. Chaque run
 enregistre les tokens (entrée, sortie, cache) lus dans la sortie JSON du worker. `cockpit costs
 <projet> [--since ...] [--transcript <journal.jsonl>]` sépare le coût des workers de celui de
 l'architecte. Les unités ne sont jamais mélangées : euros mesurés (API payante), équivalent API
