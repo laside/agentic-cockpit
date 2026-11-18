@@ -66,7 +66,7 @@ cp config/runners.example.toml  ~/.config/agentic-cockpit/runners.toml
 ```
 
 - `projects.toml` : registre des projets, chemins de worktrees, branche par défaut, ports, et
-  `merge_mode` (`"local"` par défaut, ou `"github"`).
+  `merge_mode` (`"local"` par défaut, `"github"`, ou `"github_pr"`).
 - `runners.toml` : une entrée par voie (commande `argv`, quotas, délais, Porte 1 statique).
 - `config/lanes.yaml` : budgets et seuils du Gouverneur de quotas.
 - `forbidden-words.txt` : liste privée de motifs (une expression régulière par ligne, `#` pour les
@@ -122,6 +122,15 @@ Pour un projet dont `projects.toml` contient `merge_mode = "github"` :
 La branche `main` reste protégée : le pipeline ne pousse jamais directement dessus et la roadmap est
 régénérée sans être commitée. Côté GitHub, activez la protection de `main` et exigez les checks CI
 avant fusion. En mode `local` (défaut), la fusion se fait en `--no-ff` depuis le dépôt racine.
+
+Pour un projet dont `projects.toml` contient `merge_mode = "github_pr"` (PR seule), le push et la
+création (ou réutilisation) de la PR sont identiques au mode `github`, puis le pipeline s'arrête :
+aucun `gh pr checks`, aucun `gh pr merge`. Le ticket passe à l'état `PR_OPEN` (événement `PR_OPENED`
+avec l'URL). Le corps de PR est généré sans LLM (contrat, fichiers modifiés, diffstat, résultat des
+Portes 0/1, coût du dernier run lu dans la table `runs`) ; le titre et le corps passent par la liste
+privée avant tout push (`PR_PRIVACY_FAIL` sinon). `PR_OPEN` est hors des états actifs : le ticket
+n'est ni relancé ni compté en échec par `auto`, ses dépendants restent bloqués, et `status`
+l'affiche dans la section « PR OUVERTES ».
 
 ## Économie de tokens
 
