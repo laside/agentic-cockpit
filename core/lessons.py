@@ -335,6 +335,18 @@ def _db_par_defaut() -> str:
     return str(cockpit / "db" / "cockpit_pmo.db")
 
 
+def _regles_par_defaut(db_path: str, project_id: str) -> str:
+    """Fichier lu par le brief des workers : <racine du projet>/.nexus/rules/core.md."""
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("SELECT root_path FROM projects WHERE id = ?", (project_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        raise SystemExit(f"Projet inconnu : {project_id}")
+    return str(Path(row[0]) / ".nexus" / "rules" / "core.md")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cockpit lessons",
@@ -343,7 +355,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("project", help="identifiant du projet")
     parser.add_argument("--apply", action="store_true", help="écrire les règles dans le fichier cible")
     parser.add_argument("--db", default=None, help="chemin de la base SQLite")
-    parser.add_argument("--rules", default="AGENTS.md", help="fichier de règles cible")
+    parser.add_argument("--rules", default="",
+                        help="fichier de règles cible (défaut : <racine du projet>/.nexus/rules/core.md)")
     parser.add_argument("--min", type=int, default=MIN_OCCURRENCES, dest="min_occurrences",
                         help="nombre minimal d'occurrences")
     parser.add_argument("--json", action="store_true", help="afficher les groupes et règles en JSON")
@@ -363,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
         print(render_section(regles))
 
     if args.apply:
-        apply_rules(args.rules, regles)
+        apply_rules(args.rules or _regles_par_defaut(args.db or _db_par_defaut(), args.project), regles)
     return 0
 
 
