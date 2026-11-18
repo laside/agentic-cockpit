@@ -144,6 +144,25 @@ def private_text_hits(text: str) -> list[str]:
     return hits
 
 
+ALLOWED_COMMIT_EMAIL_DOMAINS = frozenset(
+    {"users.noreply.github.com", "noreply.github.com", "example.com", "example.org", "localhost", "anthropic.com"}
+)
+
+
+def commit_identity_leaks(repo: Path, ref: str) -> list[str]:
+    """Champs auteur/committer du commit `ref` dont l'e-mail n'est pas autorisé ou qui citent un motif privé."""
+    out = sh(["git", "log", "-1", "--format=%an%x00%ae%x00%cn%x00%ce", ref], repo, check=False).stdout.strip()
+    parts = out.split("\x00")
+    if len(parts) != 4:
+        return []
+    leaks = []
+    for label, value in zip(("author", "author-email", "committer", "committer-email"), parts):
+        if label.endswith("email") and value.rsplit("@", 1)[-1].lower() not in ALLOWED_COMMIT_EMAIL_DOMAINS:
+            leaks.append(f"{label}: email-non-autorise")
+        leaks += [f"{label}: {h}" for h in private_text_hits(value)]
+    return leaks
+
+
 def stage_paths(wt: Path, paths: list[str]) -> None:
     """Indexe ajouts, modifications et suppressions ; tolère une suppression déjà indexée (`git rm`)."""
     present = [p for p in paths if (wt / p).exists()]
@@ -977,14 +996,15 @@ def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool =
                 detail = (checks.stdout or checks.stderr).strip()[-300:]
                 db.add_event(project_id, ticket_id, "PR_CHECKS_FAIL", detail)
                 raise PipelineError(f"{ticket_id} : checks GitHub en échec, rien n'est fusionné.\n{detail}")
-            merge_argv = [gh, "pr", "merge", branch, "--squash", "--delete-branch"]
-            author_email = sh(["git", "config", "user.email"], wt, check=False).stdout.strip()
-            if author_email:
-                # Sinon GitHub prend l'adresse du compte, qui peut être privée.
-                merge_argv += ["--author-email", author_email]
-            sh(merge_argv, wt)
+            sh([gh, "pr", "merge", branch, "--squash", "--delete-branch"], wt)
             sh(["git", "fetch", remote], root)
             sh(["git", "merge", "--ff-only", f"{remote}/{default}"], root)
+            # Le commit de squash est créé par GitHub avec l'adresse du compte : la vérifier.
+            leaks = commit_identity_leaks(root, f"{remote}/{default}")
+            if leaks:
+                db.add_event(project_id, ticket_id, "PRIVACY_LEAK", ", ".join(leaks))
+                say(f"{ticket_id} : ATTENTION, identité de commit non autorisée sur {default} ({', '.join(leaks)}). "
+                    "Activer « Keep my email addresses private » dans les réglages GitHub.")
             sh(["git", "worktree", "remove", "--force", str(wt)], root, check=False)
             sh(["git", "branch", "-D", branch], root, check=False)
             unblocked = db.complete_and_merge_ticket(project_id, ticket_id)
