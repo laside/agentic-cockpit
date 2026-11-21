@@ -1,0 +1,24 @@
+# Agentic Cockpit — Exemple d'actions personnalisées de l'onglet Commande.
+# Copiez ce fichier vers ~/.config/agentic-cockpit/actions.toml (ou $COCKPIT_CONFIG_DIR/actions.toml),
+# puis décommentez et adaptez. Jetons remplacés dans argv : {ticket} {projet} {worktree} {cockpit_home}.
+# `etats` : états du ticket concernés ; `projets` : liste vide = tous les projets.
+
+# Exemple 1 : relecture d'un ticket par un script personnel.
+# [[action]]
+# id = "relecture"
+# libelle = "Relire avec mon script"
+# etats = ["GATE2"]
+# projets = []
+# confirmation = false
+# longue = true
+# argv = ["bash", "/chemin/vers/relire.sh", "{projet}", "{ticket}", "{worktree}"]
+
+# Exemple 2 : approbation par un script personnel.
+# [[action]]
+# id = "approbation"
+# libelle = "Approuver avec mon script"
+# etats = ["GATE2"]
+# projets = ["demo"]
+# confirmation = true
+# longue = true
+# argv = ["bash", "/chemin/vers/approuver.sh", "{ticket}", "{cockpit_home}"]
