@@ -293,6 +293,99 @@ class TestBoutonsGlobaux(TestCommandeApp):
     test_filtre_a_relire_ne_montre_que_gate2 = None
 
 
+@unittest.skipUnless(TEXTUAL, "Textual non installé (voir scripts/tui-setup.sh)")
+class TestRafraichissementSousModale(TestBoutonsGlobaux):
+    """Le rafraîchissement périodique vise l'écran principal, même sous une fenêtre modale."""
+
+    def verifier_sous_modale(self, ticket: str, ouvrir, type_ecran, fermer) -> None:
+        self.cli_factice('echo "SORTIE $*"')
+
+        async def scenario() -> None:
+            app = self.nouvelle_app()
+            async with app.run_test(size=(180, 50)) as pilot:
+                await self.attendre(app, pilot)
+                await app._ticket_surligne(mock.Mock(option=mock.Mock(id=ticket)))
+                await self.attendre(app, pilot)
+                await ouvrir(app, pilot)
+                await self.attendre(app, pilot)
+                self.assertIsInstance(app.screen, type_ecran)
+                for _ in range(2):
+                    app._tic()
+                    await self.attendre(app, pilot)
+                    await app._appliquer({"projet": "demo", "filtre": app.filtre, "ticket_id": ticket,
+                                          "erreur": None, "tickets": app.model.list_tickets("demo", app.filtre),
+                                          "detail": app.model.ticket_detail("demo", ticket),
+                                          "worktree": None, "evenements": []})
+                self.assertTrue(app.is_running)
+                self.assertIsInstance(app.screen, type_ecran)
+                self.assertFalse(any("introuvable" in m or "échec" in m for m in app.messages), app.messages)
+                await fermer(app, pilot)
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, type_ecran)
+                self.assertIs(app.screen, app.ecran_principal)
+                self.assertIn(ticket, str(app.query_one("#detail").render()))
+
+        asyncio.run(scenario())
+
+    @staticmethod
+    async def echap(app, pilot) -> None:
+        await pilot.press("escape")
+
+    def _bouton_haut(self, bouton: str) -> None:
+        async def ouvrir(app, pilot) -> None:
+            await pilot.click(f"#g-{bouton}")
+        self.verifier_sous_modale("T-002", ouvrir, app_mod.SortieScreen, self.echap)
+
+    def test_brief_sous_rafraichissement(self) -> None:
+        self._bouton_haut("brief")
+
+    def test_couts_sous_rafraichissement(self) -> None:
+        self._bouton_haut("costs")
+
+    def test_simulation_sous_rafraichissement(self) -> None:
+        self._bouton_haut("auto_dry")
+
+    def test_diff_sous_rafraichissement(self) -> None:
+        async def ouvrir(app, pilot) -> None:
+            app._afficher_diff(actions.Action("diff", "Voir le diff", False, False, ["echo", "+ligne"]))
+        self.verifier_sous_modale("T-001", ouvrir, app_mod.DiffScreen, self.echap)
+
+    def _confirmation(self, ticket: str, action_id: str) -> None:
+        async def ouvrir(app, pilot) -> None:
+            app.demander(next(a for a in app.actions_ticket if a.id == action_id))
+
+        async def fermer(app, pilot) -> None:
+            await pilot.click("#non")
+        self.verifier_sous_modale(ticket, ouvrir, app_mod.ConfirmScreen, fermer)
+
+    def test_confirmation_approuver_sous_rafraichissement(self) -> None:
+        self._confirmation("T-001", "approve")
+
+    def test_confirmation_abandonner_sous_rafraichissement(self) -> None:
+        self._confirmation("T-002", "abandon")
+
+    def test_exception_de_rafraichissement_notee(self) -> None:
+        async def scenario() -> None:
+            app = self.nouvelle_app()
+            async with app.run_test(size=(180, 50)) as pilot:
+                await self.attendre(app, pilot)
+                with mock.patch.object(app, "_maj_liste", side_effect=RuntimeError("boum")):
+                    app.action_rafraichir()
+                    await self.attendre(app, pilot)
+                self.assertTrue(app.is_running)
+                self.assertTrue(any("boum" in m for m in app.messages))
+
+        asyncio.run(scenario())
+
+    test_brief_dans_la_fenetre = None
+    test_couts_dans_la_fenetre = None
+    test_simulation_dans_la_fenetre = None
+    test_erreur_et_commande_introuvable_affichees = None
+    test_synchroniser_journal_puis_rafraichit = None
+    test_rafraichir_recharge_sans_commande = None
+    test_infos_bulles = None
+
+
 class TestNormalisation(unittest.TestCase):
     @unittest.skipUnless(TEXTUAL, "Textual non installé (voir scripts/tui-setup.sh)")
     def test_normaliser_ticket(self) -> None:

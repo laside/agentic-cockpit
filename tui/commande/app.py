@@ -22,7 +22,8 @@ from textual import on, work  # noqa: E402
 from textual.app import App, ComposeResult  # noqa: E402
 from textual.binding import Binding  # noqa: E402
 from textual.containers import Horizontal, Vertical, VerticalScroll  # noqa: E402
-from textual.screen import ModalScreen  # noqa: E402
+from textual.css.query import NoMatches  # noqa: E402
+from textual.screen import ModalScreen, Screen  # noqa: E402
 from textual.widgets import Button, Footer, OptionList, RichLog, Select, Static  # noqa: E402
 from textual.widgets.option_list import Option  # noqa: E402
 
@@ -228,6 +229,16 @@ class CommandeApp(App[None]):
         yield RichLog(id="journal", wrap=True, markup=False)
         yield Footer()
 
+    @property
+    def ecran_principal(self) -> Screen:
+        """Écran principal (bas de la pile) : cible de toutes les mises à jour d'arrière-plan,
+        même quand une fenêtre modale est ouverte par-dessus."""
+        return self.screen_stack[0]
+
+    def _w(self, selecteur: str, type_: type | None = None) -> Any:
+        ecran = self.ecran_principal
+        return ecran.query_one(selecteur, type_) if type_ else ecran.query_one(selecteur)
+
     async def on_mount(self) -> None:
         self._verrou = asyncio.Lock()
         self.set_interval(self.intervalle, self._tic)
@@ -238,8 +249,11 @@ class CommandeApp(App[None]):
         self._charger(self.projet, self.filtre, self.ticket_id)
 
     def _tic(self) -> None:
-        self._sonder_processus()
-        self.action_rafraichir()
+        try:
+            self._sonder_processus()
+            self.action_rafraichir()
+        except Exception as exc:  # noqa: BLE001 - un rafraîchissement ne plante jamais l'écran
+            self._noter(f"Rafraîchissement en échec : {exc!r}")
 
     @work(thread=True, exclusive=True, group="chargement")
     def _charger(self, projet: str, filtre: str, ticket_id: str | None) -> None:
@@ -264,25 +278,34 @@ class CommandeApp(App[None]):
     async def _appliquer(self, d: dict[str, Any]) -> None:
         if d["projet"] != self.projet or d["filtre"] != self.filtre:
             return  # résultat périmé
-        assert self._verrou is not None
+        if self._verrou is None:
+            return
         async with self._verrou:
-            if d["erreur"]:
-                self._noter(d["erreur"])
-            else:
-                await self._maj_liste(d["tickets"])
-                if d["ticket_id"] == self.ticket_id:
-                    self.detail = d["detail"]
-                    self.worktree = d["worktree"]
-                    self.query_one("#detail", Static).update(self._rendre_detail(self.detail))
-                await self._maj_boutons()
-            self._maj_journal(d["evenements"])
+            try:
+                if d["erreur"]:
+                    self._noter(d["erreur"])
+                else:
+                    await self._maj_liste(d["tickets"])
+                    if d["ticket_id"] == self.ticket_id:
+                        self.detail = d["detail"]
+                        self.worktree = d["worktree"]
+                        self._w("#detail", Static).update(self._rendre_detail(self.detail))
+                    await self._maj_boutons()
+            except NoMatches as exc:
+                self._noter(f"Rafraîchissement : élément introuvable ({exc})")
+            except Exception as exc:  # noqa: BLE001 - un rafraîchissement ne plante jamais l'écran
+                self._noter(f"Rafraîchissement en échec : {exc!r}")
+            try:
+                self._maj_journal(d["evenements"])
+            except Exception as exc:  # noqa: BLE001
+                self._noter(f"Journal non mis à jour : {exc!r}")
 
     async def _maj_liste(self, tickets: list[dict[str, Any]]) -> None:
         if [t["id"] + t["state"] for t in tickets] == [t["id"] + t["state"] for t in self.tickets]:
             self.tickets = tickets
             return
         self.tickets = tickets
-        liste = self.query_one("#tickets", OptionList)
+        liste = self._w("#tickets", OptionList)
         liste.clear_options()
         options = []
         for t in tickets:
@@ -353,7 +376,7 @@ class CommandeApp(App[None]):
         await self._remplacer("#boutons-ticket", "act", self.actions_ticket)
 
     async def _remplacer(self, selecteur: str, prefixe: str, acts: list[Action]) -> None:
-        conteneur = self.query_one(selecteur)
+        conteneur = self._w(selecteur)
         actuels = [b.id for b in conteneur.query(Button)]
         voulus = [f"{prefixe}-{a.id}" for a in acts]
         if actuels != voulus:
@@ -366,11 +389,14 @@ class CommandeApp(App[None]):
             b.variant = "warning" if a.confirmation else "default"
 
     def _maj_desactivation(self) -> None:
-        for prefixe, acts, sel in (("g", self.actions_entete, "#boutons-globaux"),
-                                   ("act", self.actions_ticket, "#boutons-ticket")):
-            for a in acts:
-                for b in self.query_one(sel).query(f"#{prefixe}-{a.id}"):
-                    b.disabled = self._desactive(a)
+        try:
+            for prefixe, acts, sel in (("g", self.actions_entete, "#boutons-globaux"),
+                                       ("act", self.actions_ticket, "#boutons-ticket")):
+                for a in acts:
+                    for b in self._w(sel).query(f"#{prefixe}-{a.id}"):
+                        b.disabled = self._desactive(a)
+        except Exception as exc:  # noqa: BLE001 - jamais de plantage de l'écran
+            self._noter(f"Boutons non mis à jour : {exc!r}")
 
     # ---------- événements d'interface ----------
     @on(OptionList.OptionHighlighted, "#tickets")
@@ -530,7 +556,7 @@ class CommandeApp(App[None]):
         self.messages = self.messages[-50:]
 
     def _maj_journal(self, evenements: list[dict[str, Any]]) -> None:
-        log = self.query_one("#journal", RichLog)
+        log = self._w("#journal", RichLog)
         log.clear()
         for m in self.messages[-10:]:
             log.write(m)
