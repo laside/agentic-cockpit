@@ -38,6 +38,33 @@ COULEURS_ETAT = {
 NOMS_FILTRES = list(FILTRES.keys())
 INTERVALLE_RAFRAICHISSEMENT = 3.0
 LIGNES_JOURNAL = 25
+DELAI_SORTIE = 120  # secondes max pour Brief, Coûts, Simulation
+
+# Boutons du haut dont la sortie s'affiche dans une fenêtre modale.
+ACTIONS_MODALES = {"brief", "costs", "auto_dry"}
+
+INFOS_BULLES = {
+    "sync_projet": "Enregistre les PR fusionnées sur GitHub, débloque les tickets dépendants, nettoie les worktrees.",
+    "rafraichir": "Recharge tout de suite les tickets et le journal.",
+    "brief": "Résumé de reprise en 30 lignes (branche, tickets, prochain ticket, coût du jour).",
+    "costs": "Dépenses par voie et par ticket, sans mélanger les unités.",
+    "auto_dry": "Montre ce que la boucle automatique lancerait, sans rien lancer.",
+    # actions de ticket
+    "promote": "Passe le brouillon à l'état prêt (READY).",
+    "abandon": "Abandonne le ticket (confirmation demandée).",
+    "run": "Lance un worker sur la voie choisie.",
+    "claim": "Prend le ticket en main manuellement.",
+    "events": "Affiche l'historique des événements du ticket.",
+    "submit": "Soumet le travail du ticket à la relecture.",
+    "diff": "Affiche le diff du worktree du ticket.",
+    "approve": "Approuve le ticket et ouvre la PR (confirmation demandée).",
+    "sync": "Enregistre la fusion de la PR et met à jour le ticket.",
+}
+
+
+def info_bulle(a: Action) -> str:
+    """Info-bulle d'un bouton ; repli sur la commande pour les actions personnalisées."""
+    return INFOS_BULLES.get(a.id) or f"Exécute : {' '.join(a.argv)}"[:200]
 
 
 def normaliser_ticket(brut: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -62,7 +89,9 @@ def calculer_actions(
     toutes = actions_mod.actions_for(projet, ticket, voie_choisie, worktree, branche)
     perso = actions_mod.actions_personnalisees(projet, ticket, worktree, model.home)
     ids_projet = {a.id for a in actions_mod.actions_projet(projet)}
-    entete = [a for a in toutes if a.id in ids_projet]
+    # « État » (cockpit status) remplacé par « Rafraîchir » : rechargement local, aucune commande.
+    entete = [Action("rafraichir", "Rafraîchir", False, False, []) if a.id == "status" else a
+              for a in toutes if a.id in ids_projet]
     entete += [a for a in actions_mod.actions_personnalisees(projet, None, None, model.home)
                if a.id not in {x.id for x in entete}]
     deja = {a.id for a in entete}
@@ -112,6 +141,31 @@ class DiffScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="diff-boite"):
             yield Static(Text(self.contenu or "(diff vide)"), id="diff-texte")
+
+    def action_fermer(self) -> None:
+        self.dismiss(None)
+
+
+class SortieScreen(ModalScreen[None]):
+    """Sortie d'une commande du haut (Brief, Coûts, Simulation), défilante."""
+
+    BINDINGS = [Binding("escape", "fermer", "Fermer")]
+
+    def __init__(self, titre: str, contenu: str) -> None:
+        super().__init__()
+        self.titre = titre
+        self.contenu = contenu
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="sortie-boite"):
+            yield Static(Text(self.titre, style="bold"), id="sortie-titre")
+            with VerticalScroll(id="sortie-defil"):
+                yield Static(Text(self.contenu or "(aucune sortie)"), id="sortie-texte")
+            yield Button("Fermer", id="sortie-fermer")
+
+    @on(Button.Pressed, "#sortie-fermer")
+    def _fermer(self) -> None:
+        self.dismiss(None)
 
     def action_fermer(self) -> None:
         self.dismiss(None)
@@ -307,6 +361,7 @@ class CommandeApp(App[None]):
             await conteneur.mount(*[Button(a.libelle, id=f"{prefixe}-{a.id}") for a in acts])
         for a in acts:
             b = conteneur.query_one(f"#{prefixe}-{a.id}", Button)
+            b.tooltip = info_bulle(a)
             b.disabled = self._desactive(a)
             b.variant = "warning" if a.confirmation else "default"
 
@@ -393,6 +448,14 @@ class CommandeApp(App[None]):
         if a.id == "diff":
             self._afficher_diff(a)
             return
+        if a.id == "rafraichir":
+            self._noter("Rafraîchissement demandé.")
+            self.action_rafraichir()
+            return
+        if a.id in ACTIONS_MODALES:
+            self._noter(f"Lancé : {a.libelle}")
+            self._afficher_sortie(a)
+            return
         try:
             d = Path(self.log_dir) if self.log_dir else actions_mod.LOG_DIR
             d.mkdir(parents=True, exist_ok=True)
@@ -414,15 +477,43 @@ class CommandeApp(App[None]):
     def _sonder_processus(self) -> None:
         """poll() de chaque processus lancé : évite les zombies et libère les boutons longs."""
         restants = []
+        resync = False
         for proc, a, journal in self.procs:
             code = proc.poll()
             if code is None:
                 restants.append((proc, a, journal))
             else:
                 self._noter(f"Terminé : {a.libelle} (code {code})")
+                resync = resync or a.id == "sync_projet"
         if len(restants) != len(self.procs):
             self.procs = restants
             self._maj_desactivation()
+        if resync:
+            self.action_rafraichir()  # Synchroniser : écran rechargé à la fin
+
+    @work(thread=True, group="sortie")
+    def _afficher_sortie(self, a: Action) -> None:
+        """Exécute une commande courte, puis montre sa sortie dans une fenêtre modale."""
+        try:
+            res = subprocess.run(a.argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                 errors="replace", timeout=DELAI_SORTIE, check=False)
+            texte = res.stdout + res.stderr
+            if res.returncode == 0:
+                ligne = f"Terminé : {a.libelle} (code 0)"
+            else:
+                ligne = f"Erreur : {a.libelle} (code {res.returncode})"
+                texte = f"Erreur (code {res.returncode}) :\n{texte}"
+        except FileNotFoundError:
+            ligne = texte = f"Commande introuvable : {a.argv[0]}"
+        except subprocess.TimeoutExpired:
+            ligne = texte = f"Erreur : {a.libelle} dépasse {DELAI_SORTIE} s, interrompue."
+        except Exception as exc:  # noqa: BLE001 - jamais de plantage de l'écran
+            ligne = texte = f"Échec de « {a.libelle} » : {exc}"
+        self.call_from_thread(self._montrer_sortie, a.libelle, texte, ligne)
+
+    def _montrer_sortie(self, titre: str, texte: str, ligne: str) -> None:
+        self._noter(ligne)
+        self.push_screen(SortieScreen(titre, texte))
 
     @work(thread=True, group="diff")
     def _afficher_diff(self, a: Action) -> None:

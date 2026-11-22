@@ -30,7 +30,18 @@ Screen {
 
 #journal { height: 10; border: round #3b4252; }
 
-ConfirmScreen, DiffScreen { align: center middle; }
+ConfirmScreen, DiffScreen, SortieScreen { align: center middle; }
+#sortie-boite {
+    width: 90%;
+    height: 90%;
+    padding: 0 1;
+    border: thick #81a1c1;
+    background: #10131a;
+}
+#sortie-titre { height: 1; color: #81a1c1; }
+#sortie-defil { height: 1fr; }
+#sortie-texte { padding: 0 1; }
+#sortie-fermer { margin-top: 1; }
 #dialogue {
     width: 70;
     height: auto;

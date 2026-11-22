@@ -149,6 +149,150 @@ class TestCommandeApp(unittest.TestCase):
         asyncio.run(scenario())
 
 
+@unittest.skipUnless(TEXTUAL, "Textual non installé (voir scripts/tui-setup.sh)")
+class TestBoutonsGlobaux(TestCommandeApp):
+    """Un test par bouton du haut (Synchroniser, Rafraîchir, Brief, Coûts, Simulation)."""
+
+    def cli_factice(self, corps: str) -> None:
+        f = self.base / "cli-echo"
+        f.write_text("#!/bin/sh\n" + corps + "\n", encoding="utf-8")
+        f.chmod(f.stat().st_mode | stat.S_IXUSR)
+        patch = mock.patch.object(actions, "CLI", str(f))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def verifier_modale(self, bouton: str, libelle: str, attendu: str) -> None:
+        self.cli_factice('echo "SORTIE $*"')
+
+        async def scenario() -> None:
+            app = self.nouvelle_app()
+            async with app.run_test(size=(180, 50)) as pilot:
+                await self.attendre(app, pilot)
+                await pilot.click(f"#g-{bouton}")
+                await self.attendre(app, pilot)
+                self.assertIsInstance(app.screen, app_mod.SortieScreen)
+                self.assertEqual(app.screen.titre, libelle)
+                self.assertIn(f"SORTIE {attendu}", app.screen.contenu)
+                self.assertEqual(app.procs, [])  # pas de processus détaché
+                self.assertTrue(any(f"Terminé : {libelle}" in m for m in app.messages))
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, app_mod.SortieScreen)
+                # réouverture puis fermeture par le bouton Fermer
+                await pilot.click(f"#g-{bouton}")
+                await self.attendre(app, pilot)
+                self.assertIsInstance(app.screen, app_mod.SortieScreen)
+                await pilot.click("#sortie-fermer")
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, app_mod.SortieScreen)
+
+        asyncio.run(scenario())
+
+    def test_brief_dans_la_fenetre(self) -> None:
+        self.verifier_modale("brief", "Brief", "brief demo")
+
+    def test_couts_dans_la_fenetre(self) -> None:
+        self.verifier_modale("costs", "Coûts", "costs demo")
+
+    def test_simulation_dans_la_fenetre(self) -> None:
+        self.verifier_modale("auto_dry", "Simulation de la boucle", "auto demo --slots 1 --dry-run")
+
+    def test_erreur_et_commande_introuvable_affichees(self) -> None:
+        self.cli_factice('echo "panne" >&2\nexit 3')
+
+        async def scenario() -> None:
+            app = self.nouvelle_app()
+            async with app.run_test(size=(180, 50)) as pilot:
+                await self.attendre(app, pilot)
+                await pilot.click("#g-costs")
+                await self.attendre(app, pilot)
+                self.assertIsInstance(app.screen, app_mod.SortieScreen)
+                self.assertIn("code 3", app.screen.contenu)
+                self.assertIn("panne", app.screen.contenu)
+                self.assertTrue(any("Erreur : Coûts (code 3)" in m for m in app.messages))
+                await pilot.press("escape")
+                await pilot.pause()
+                with mock.patch.object(actions, "CLI", str(self.base / "absent")):
+                    await app._maj_boutons()
+                    await pilot.click("#g-brief")
+                    await self.attendre(app, pilot)
+                self.assertIsInstance(app.screen, app_mod.SortieScreen)
+                self.assertIn("introuvable", app.screen.contenu)
+                self.assertTrue(any("introuvable" in m for m in app.messages))
+
+        asyncio.run(scenario())
+
+    def test_synchroniser_journal_puis_rafraichit(self) -> None:
+        async def scenario() -> None:
+            app = self.nouvelle_app()
+            async with app.run_test(size=(180, 50)) as pilot:
+                await self.attendre(app, pilot)
+                await pilot.click("#g-sync_projet")
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, app_mod.SortieScreen)
+                self.assertEqual(len(app.procs), 1)
+                proc, a, journal = app.procs[0]
+                self.assertEqual(a.argv, [str(self.fake), "sync", "demo"])
+                self.assertEqual(app.journal_actif, journal)
+                proc.kill()
+                proc.wait()
+                with mock.patch.object(app, "action_rafraichir") as rafraichir:
+                    app._sonder_processus()
+                rafraichir.assert_called_once()
+                self.assertTrue(any("Terminé : Synchroniser" in m for m in app.messages))
+
+        asyncio.run(scenario())
+
+    def test_rafraichir_recharge_sans_commande(self) -> None:
+        async def scenario() -> None:
+            app = self.nouvelle_app()
+            async with app.run_test(size=(180, 50)) as pilot:
+                await self.attendre(app, pilot)
+                libelles = [str(b.label) for b in app.query("#boutons-globaux Button")]
+                self.assertIn("Rafraîchir", libelles)
+                self.assertNotIn("État", libelles)
+                self.assertEqual(len(app.tickets), 4)
+                self.db.upsert_ticket("demo", "T-005", "Titre T-005", priority="P2", state="READY")
+                with mock.patch.object(app_mod.subprocess, "Popen") as popen, \
+                        mock.patch.object(app_mod.subprocess, "run") as run:
+                    await pilot.click("#g-rafraichir")
+                    await self.attendre(app, pilot)
+                popen.assert_not_called()
+                run.assert_not_called()
+                self.assertEqual(app.procs, [])
+                self.assertIn("T-005", [t["id"] for t in app.tickets])
+
+        asyncio.run(scenario())
+
+    def test_infos_bulles(self) -> None:
+        async def scenario() -> None:
+            app = self.nouvelle_app()
+            async with app.run_test(size=(180, 50)) as pilot:
+                await self.attendre(app, pilot)
+                attendus = {
+                    "g-sync_projet": "PR fusionnées", "g-rafraichir": "Recharge tout de suite",
+                    "g-brief": "30 lignes", "g-costs": "sans mélanger les unités",
+                    "g-auto_dry": "sans rien lancer",
+                }
+                for bid, extrait in attendus.items():
+                    self.assertIn(extrait, str(app.query_one(f"#{bid}", Button).tooltip))
+                await app._ticket_surligne(mock.Mock(option=mock.Mock(id="T-001")))
+                await self.attendre(app, pilot)
+                boutons = list(app.query("#boutons-ticket Button"))
+                self.assertTrue(boutons)
+                for b in boutons:
+                    self.assertTrue(b.tooltip, b.id)
+
+        asyncio.run(scenario())
+
+    # les tests hérités de TestCommandeApp ne sont pas rejoués ici
+    test_boutons_recalcules_selon_etat = None
+    test_approuver_ouvre_la_confirmation = None
+    test_une_seule_action_longue_a_la_fois = None
+    test_commande_introuvable_ne_plante_pas = None
+    test_filtre_a_relire_ne_montre_que_gate2 = None
+
+
 class TestNormalisation(unittest.TestCase):
     @unittest.skipUnless(TEXTUAL, "Textual non installé (voir scripts/tui-setup.sh)")
     def test_normaliser_ticket(self) -> None:
@@ -166,6 +310,12 @@ class TestInstallation(unittest.TestCase):
         self.assertIn("tui-venv", script)
         self.assertNotIn("sudo", script)
         self.assertNotIn("--break-system-packages", script)
+
+    def test_repli_uv(self) -> None:
+        script = (ROOT / "scripts" / "tui-setup.sh").read_text(encoding="utf-8")
+        self.assertIn("uv venv", script)
+        self.assertIn('uv pip install --quiet --python "${VENV}/bin/python" -r', script)
+        self.assertIn("Deux solutions", script)
 
 
 if __name__ == "__main__":
