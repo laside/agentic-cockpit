@@ -2,6 +2,7 @@
 
 ## L'onglet Commande
 - Premier onglet de `cockpit open <projet>` : l'écran de pilotage des tickets, qui a le focus à l'ouverture.
+- Le sélecteur de projet bascule vers la session Zellij du projet choisi (hors Zellij : recharge l'écran) ; `ui = false` dans `projects.toml` masque un projet.
 - Il se lance seul avec `cockpit ui <projet>` (sans projet : le `default_project`).
 - Premier lancement : `cockpit ui` crée l'environnement via `scripts/tui-setup.sh`.
 - Actions personnalisées : `actions.toml` (README, section « Onglet Commande »).

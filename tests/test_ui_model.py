@@ -87,6 +87,16 @@ class TestCommandeModel(unittest.TestCase):
             self.assertEqual(self.m.voies(), ["alpha", "beta"])
             self.assertIn("demo", self.m.projets())
 
+    def test_projets_visibles_exclut_ui_false(self) -> None:
+        cfg = self.base / "cfg"
+        cfg.mkdir()
+        (cfg / "projects.toml").write_text(
+            '[projects.a]\nroot = "/tmp/a"\n[projects.b]\nroot = "/tmp/b"\nui = false\n'
+            '[projects.c]\nroot = "/tmp/c"\nui = true\n', encoding="utf-8")
+        with mock.patch.dict(os.environ, {"COCKPIT_CONFIG_DIR": str(cfg)}):
+            self.assertEqual(sorted(self.m.projets_visibles()), ["a", "c"])
+            self.assertIn("b", self.m.projets())  # la configuration complète reste lisible
+
     def test_worktree_of(self) -> None:
         repo = self.base / "repo"
         repo.mkdir()

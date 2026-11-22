@@ -48,6 +48,17 @@ case "$CMD" in
         -e "s|__SIDECAR_PORT__|$SIDECAR_PORT|g" \
         -e "s|__COCKPIT_HOME__|$COCKPIT_HOME|g" \
         "$COCKPIT_HOME/layouts/cockpit.kdl.tmpl" > "$LAYOUT_FILE"
+    if [ -n "${ZELLIJ:-}" ]; then
+      # Déjà dans Zellij : jamais de session imbriquée, on bascule de session (les autres restent ouvertes).
+      if ! zellij action switch-session --help >/dev/null 2>&1; then
+        echo "Cette version de Zellij ne permet pas « zellij action switch-session » : mettez Zellij à jour, ou quittez la session (Ctrl+o d) puis lancez « cockpit switch $PROJECT »." >&2
+        exit 1
+      fi
+      if ! zellij list-sessions --no-formatting 2>/dev/null | grep -q "^$SESSION\b"; then
+        zellij attach --create-background "$SESSION" options --default-layout "$LAYOUT_FILE" >/dev/null
+      fi
+      exec zellij action switch-session "$SESSION"
+    fi
     if zellij list-sessions --no-formatting 2>/dev/null | grep -q "^$SESSION\b"; then
       exec zellij attach "$SESSION"
     else
