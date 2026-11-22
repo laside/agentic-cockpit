@@ -38,13 +38,27 @@ class TestActionsParEtat(unittest.TestCase):
 
     def test_ready(self):
         a = actions.actions_for("demo", tk("READY"), "alpha")
-        self.assertEqual(ids(a)[:3], ["run", "claim", "abandon"])
-        self.assertTrue(a[0].longue)
-        self.assertEqual(a[0].argv, ["cockpit", "run", "T-1", "demo", "--lane", "alpha", "--no-gate1"])
-        self.assertEqual(a[1].argv[-2:], ["--as", "claude"])
+        self.assertEqual(ids(a)[:4], ["demote", "run", "claim", "abandon"])
+        self.assertEqual(a[0].libelle, "Remettre en brouillon")
+        self.assertFalse(a[0].confirmation)
+        self.assertEqual(a[0].argv, ["cockpit", "ticket", "demote", "demo", "T-1"])
+        self.assertTrue(a[1].longue)
+        self.assertEqual(a[1].argv, ["cockpit", "run", "T-1", "demo", "--lane", "alpha", "--no-gate1"])
+        self.assertEqual(a[2].argv[-2:], ["--as", "claude"])
 
     def test_blocked(self):
-        self.assertEqual(ids(actions.actions_for("demo", tk("BLOCKED")))[:2], ["events", "abandon"])
+        a = actions.actions_for("demo", tk("BLOCKED"))
+        self.assertEqual(ids(a)[:3], ["demote", "events", "abandon"])
+        self.assertEqual(a[0].argv, ["cockpit", "ticket", "demote", "demo", "T-1"])
+
+    def test_draft_libelle_marquer_pret(self):
+        a = actions.actions_for("demo", tk("DRAFT"))
+        self.assertEqual(a[0].libelle, "Marquer prêt")
+        self.assertFalse(a[0].confirmation)
+
+    def test_demote_absent_des_autres_etats(self):
+        for etat in ("DRAFT", "ASSIGNED", "GATE2", "PR_OPEN", "MERGED"):
+            self.assertNotIn("demote", ids(actions.actions_for("demo", tk(etat))))
 
     def test_assigned_interactive(self):
         a = actions.actions_for("demo", tk("ASSIGNED", "interactive"))

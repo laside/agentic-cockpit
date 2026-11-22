@@ -56,17 +56,19 @@ def actions_for(
         voie = ticket.get("lane") or ticket.get("voie") or ""
         abandon = Action("abandon", "Abandonner", True, False,
                          [CLI, "abandon", tid, projet, "--reason", "abandonné depuis l'onglet Commande"])
+        demote = Action("demote", "Remettre en brouillon", False, False, [CLI, "ticket", "demote", projet, tid])
         if etat == "DRAFT":
-            res += [Action("promote", "Promouvoir", False, False, [CLI, "ticket", "promote", projet, tid]), abandon]
+            res += [Action("promote", "Marquer prêt", False, False, [CLI, "ticket", "promote", projet, tid]), abandon]
         elif etat == "READY":
             res += [
+                demote,
                 Action("run", "Lancer", False, True,
                        [CLI, "run", tid, projet, "--lane", voie_choisie, "--no-gate1"]),
                 Action("claim", "Prendre en main", False, False, [CLI, "claim", tid, projet, "--as", "claude"]),
                 abandon,
             ]
         elif etat == "BLOCKED":
-            res += [Action("events", "Voir les événements", False, False, [CLI, "events", projet]), abandon]
+            res += [demote, Action("events", "Voir les événements", False, False, [CLI, "events", projet]), abandon]
         elif etat == "ASSIGNED" and voie == "interactive":
             res.append(Action("submit", "Soumettre", False, True, [CLI, "submit", tid, projet]))
         elif etat == "GATE2":

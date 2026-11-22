@@ -1,0 +1,64 @@
+Screen {
+    background: #10131a;
+    color: #d8dee9;
+}
+
+#entete {
+    height: auto;
+    padding: 0 1;
+    background: #1b2030;
+}
+#entete Button, #boutons-ticket Button, #filtres Button {
+    margin-right: 1;
+    min-width: 8;
+}
+#barre-projet { height: 3; }
+#projet { width: 28; }
+#boutons-globaux { height: auto; }
+
+#corps { height: 1fr; }
+#gauche { width: 50%; border: round #3b4252; }
+#droite { width: 50%; }
+#filtres { height: auto; }
+#tickets { height: 1fr; }
+
+#detail-zone { height: 1fr; border: round #3b4252; }
+#detail { padding: 0 1; }
+#actions-zone { height: auto; max-height: 14; border: round #3b4252; padding: 0 1; }
+#voie { width: 30; }
+#boutons-ticket { height: auto; }
+
+#journal { height: 10; border: round #3b4252; }
+
+/* ---------- fenêtres modales ---------- */
+ConfirmScreen, DiffScreen, SortieScreen {
+    align: center middle;
+    background: #000000 60%;
+}
+.fenetre {
+    width: 85%;
+    height: 80%;
+    padding: 1 2;
+    border: round #81a1c1;
+    background: #0f1a2e;
+}
+.fenetre-entete { height: 1; margin-bottom: 1; }
+.fenetre-titre { width: 1fr; }
+.fenetre-heure { width: auto; color: #7b88a1; }
+.fenetre-defil { height: 1fr; background: #0f1a2e; scrollbar-color: #81a1c1; }
+.fenetre-texte { padding: 0 1; }
+.fenetre-fixe { color: #d8dee9; }
+.fenetre-erreur { color: #bf616a; }
+.fenetre-section { padding: 0 1; margin-bottom: 1; }
+.fenetre-bloc {
+    padding: 0 1;
+    margin-bottom: 1;
+    border-left: tall #81a1c1;
+    background: #13213a;
+}
+.fenetre DataTable { height: auto; margin: 0 1 1 1; background: #0f1a2e; }
+.fenetre-pied { height: 3; margin-top: 1; }
+.fenetre-pied Button { margin-right: 1; min-width: 10; }
+.fenetre-copier, .fenetre-non { background: #3b4252; }
+.fenetre-oui { text-style: bold; }
+.fenetre-rappel { width: 1fr; height: 3; content-align: right middle; color: #7b88a1; }
