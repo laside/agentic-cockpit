@@ -108,6 +108,7 @@ Toutes les commandes passent par le lanceur unique `bin/cockpit` :
 - `cockpit install-hooks` : installe le hook git `pre-push` de confidentialité.
 - `cockpit lessons <projet> [--apply] [--db chemin] [--rules chemin] [--min N]` : propose des règles
   courtes à partir des échecs récurrents, sans token.
+- `cockpit ui [projet]` : écran Textual de l'onglet Commande (voir ci-dessous) ; sans projet, `default_project`.
 
 `cockpit help` affiche la liste complète.
 
@@ -125,6 +126,30 @@ les règles de façon idempotente dans la section bornée à 20 règles maximum,
 cible (`templates/core.md` par défaut, ou `--rules chemin`), délimitée exactement par les marqueurs
 `<!-- BEGIN COCKPIT LESSONS -->` et `<!-- END COCKPIT LESSONS -->`. La commande ne consomme aucun
 token et n'écrit rien sans `--apply`.
+
+## Onglet Commande
+
+L'onglet « Commande » est le premier onglet de `cockpit open <projet>`. Il affiche l'écran Textual
+de pilotage des tickets (code dans `tui/commande/`).
+
+**Installation** : `scripts/tui-setup.sh` crée un environnement virtuel dédié (par défaut
+`~/.local/share/agentic-cockpit/tui-venv`, modifiable par la variable `TUI_VENV`) et y installe
+`requirements-tui.txt`. Aucune installation système. Si l'environnement manque, `cockpit ui` lance ce
+script avant d'ouvrir l'écran.
+
+**Lancement** : `cockpit ui [projet]`. Sans projet, c'est le `default_project` de `projects.toml`.
+Le PATH de l'écran commence par le `bin/` du cockpit : une action dont la commande commence par
+`cockpit` fonctionne même si `bin/` n'est pas dans votre PATH.
+
+**Actions personnalisées** : copier `config/actions.example.toml` vers
+`~/.config/agentic-cockpit/actions.toml` (ou `$COCKPIT_CONFIG_DIR/actions.toml`), puis décommenter
+et adapter. Chaque entrée `[[action]]` contient :
+
+- `id`, `libelle` (texte affiché) et `argv` (liste de chaînes, lancée sans shell) ;
+- `etats` et `projets` (filtres facultatifs ; liste vide = tous) ;
+- `confirmation` et `longue` (booléens facultatifs).
+
+Jetons remplacés dans `argv` : `{ticket}`, `{projet}`, `{worktree}`, `{cockpit_home}`.
 
 ## Rédaction assistée de tickets
 

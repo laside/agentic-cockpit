@@ -10,7 +10,13 @@ layout {
         }
     }
 
-    tab name="1: Cockpit Vibe (__PROJECT_NAME__)" focus=true {
+    tab name="Commande" focus=true {
+        pane name="Commande (__PROJECT_NAME__)" command="__COCKPIT_HOME__/bin/cockpit" {
+            args "ui" "__PROJECT_ID__"
+        }
+    }
+
+    tab name="1: Cockpit Vibe (__PROJECT_NAME__)" {
         pane split_direction="vertical" {
             pane size="50%" split_direction="horizontal" {
                 pane name="Claude • Architecte (__PROJECT_NAME__)" cwd="__WT_SESSIONS_DIR__/wt-claude" size="60%"
