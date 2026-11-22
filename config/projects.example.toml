@@ -31,8 +31,10 @@ test_unit_cmd = "make test"
 sidecar = 8795
 
 # Projet de démonstration générique.
+# ui = false (facultatif, défaut true) : masque le projet du sélecteur de l'onglet Commande.
 [projects.demo]
 name = "Demo"
+ui = true
 root = "~/projets/demo"
 worktrees_sessions_dir = "~/projets/demo-worktrees"
 worktrees_tickets_dir = "~/projets/demo-worktrees"

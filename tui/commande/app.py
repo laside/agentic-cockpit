@@ -7,6 +7,7 @@ Textual n'est utilisé que par ce module ; le cœur du cockpit reste en biblioth
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import subprocess
 import sys
@@ -467,7 +468,7 @@ class CommandeApp(App[None]):
 
     # ---------- composition ----------
     def compose(self) -> ComposeResult:
-        projets = sorted({self.projet, *self.model.projets().keys()})
+        projets = sorted({self.projet, *self.model.projets_visibles().keys()})
         with Vertical(id="entete"):
             with Horizontal(id="barre-projet"):
                 yield Select([(p, p) for p in projets], value=self.projet, allow_blank=False, id="projet")
@@ -677,10 +678,34 @@ class CommandeApp(App[None]):
 
     @on(Select.Changed, "#projet")
     def _projet_change(self, ev: Select.Changed) -> None:
-        if ev.value is not Select.BLANK and str(ev.value) != self.projet:
-            self.projet = str(ev.value)
-            self.ticket_id, self.detail, self.tickets = None, None, []
-            self.action_rafraichir()
+        if ev.value is Select.BLANK or str(ev.value) == self.projet:
+            return  # projet déjà affiché : rien à faire
+        cible = str(ev.value)
+        if os.environ.get("ZELLIJ") is not None:
+            # Dans Zellij : on amène la session du projet ; l'écran courant garde son projet.
+            self._w("#projet", Select).value = self.projet
+            self._noter(f"Bascule vers la session du projet {cible}…")
+            self._changer_session(cible)
+            return
+        self.projet = cible
+        self.ticket_id, self.detail, self.tickets = None, None, []
+        self.action_rafraichir()
+
+    @work(thread=True, group="session")
+    def _changer_session(self, cible: str) -> None:
+        """Lance « cockpit switch <projet> » ; toute erreur va au journal, jamais de plantage."""
+        try:
+            res = subprocess.run([actions_mod.CLI, "switch", cible], stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True, errors="replace",
+                                 timeout=DELAI_SORTIE, check=False)
+            ligne = (f"Session du projet {cible} : bascule demandée." if res.returncode == 0
+                     else f"Erreur de bascule vers {cible} (code {res.returncode}) "
+                          f"{(res.stdout + res.stderr).strip()}")
+        except FileNotFoundError:
+            ligne = f"Erreur de bascule vers {cible} : commande introuvable ({actions_mod.CLI})"
+        except Exception as exc:  # noqa: BLE001 - jamais de plantage de l'écran
+            ligne = f"Erreur de bascule vers {cible} : {exc}"
+        self.call_from_thread(self._noter, ligne)
 
     @on(Button.Pressed)
     def _bouton(self, ev: Button.Pressed) -> None:

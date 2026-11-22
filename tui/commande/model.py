@@ -51,6 +51,11 @@ def projets(home: Path | None = None) -> dict[str, dict[str, Any]]:
     return dict(_load_toml("projects.toml", home).get("projects", {}))
 
 
+def projets_visibles(home: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Projets du sélecteur : exclut ceux qui portent ui = false (clé facultative, défaut true)."""
+    return {k: v for k, v in projets(home).items() if not (isinstance(v, dict) and v.get("ui") is False)}
+
+
 def voies(home: Path | None = None) -> list[str]:
     """Voies disponibles : clés de [runners] de runners.toml."""
     return list(_load_toml("runners.toml", home).get("runners", {}).keys())
@@ -86,6 +91,9 @@ class CommandeModel:
 
     def projets(self) -> dict[str, dict[str, Any]]:
         return projets(self.home)
+
+    def projets_visibles(self) -> dict[str, dict[str, Any]]:
+        return projets_visibles(self.home)
 
     def voies(self) -> list[str]:
         return voies(self.home)
