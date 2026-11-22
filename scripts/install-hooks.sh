@@ -23,10 +23,30 @@ cat > "${HOOK_PATH}" <<'EOF'
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+CONFIG_DIR="${COCKPIT_CONFIG_DIR:-$HOME/.config/agentic-cockpit}"
+PROJECT_ARGS=()
+if [ -f "${CONFIG_DIR}/projects.toml" ]; then
+    PROJECT_ID="$(python3 - "${CONFIG_DIR}/projects.toml" "${REPO_ROOT}" <<'PY'
+import sys, tomllib
+from pathlib import Path
+try:
+    data = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+repo = Path(sys.argv[2]).resolve()
+for pid, conf in data.get("projects", {}).items():
+    root = conf.get("root") if isinstance(conf, dict) else None
+    if root and Path(root).expanduser().resolve() == repo:
+        print(pid)
+        break
+PY
+)"
+    if [ -n "${PROJECT_ID}" ]; then PROJECT_ARGS=(--project "${PROJECT_ID}"); fi
+fi
 
 while read -r local_ref local_sha remote_ref remote_sha; do
     [ -z "${local_sha:-}" ] && continue
-    python3 "${REPO_ROOT}/scripts/privacy-check.py" --repo "${REPO_ROOT}" --range "${remote_sha}..${local_sha}"
+    python3 "${REPO_ROOT}/scripts/privacy-check.py" --repo "${REPO_ROOT}" ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} --range "${remote_sha}..${local_sha}"
 done
 EOF
 

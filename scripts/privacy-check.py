@@ -50,12 +50,14 @@ def _is_private_rfc1918(octets: tuple[int, int, int, int]) -> bool:
     return False
 
 
-def _default_deny_file() -> Path:
+def _default_deny_file(project: str | None = None) -> Path:
     config_dir = os.environ.get("COCKPIT_CONFIG_DIR")
     if config_dir:
         base = Path(config_dir).expanduser()
     else:
         base = Path("~/.config/agentic-cockpit").expanduser()
+    if project and (base / f"forbidden-words.{project}.txt").is_file():
+        return base / f"forbidden-words.{project}.txt"
     return base / "forbidden-words.txt"
 
 
@@ -80,7 +82,7 @@ def _load_deny_patterns(deny_file: Path) -> list[tuple[str, re.Pattern[str]]]:
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        patterns.append((f"mot-interdit#{idx}", re.compile(line, re.IGNORECASE)))
+        patterns.append((f"mot-interdit#{idx} (ligne {idx} de {deny_file.name})", re.compile(line, re.IGNORECASE)))
     return patterns
 
 
@@ -233,13 +235,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Exécute uniquement les contrôles génériques sans lire la liste privée.",
     )
+    parser.add_argument("--project", default=None, help="Identifiant du projet (liste de mots propre).")
     parser.add_argument("--range", dest="commit_range", default=None, help="Plage de commits A..B.")
     args = parser.parse_args(argv)
 
     repo = Path(args.repo).resolve()
     deny_patterns: list[tuple[str, re.Pattern[str]]] = []
     if not args.generic:
-        deny_path = Path(args.deny_file).expanduser() if args.deny_file else _default_deny_file()
+        deny_path = Path(args.deny_file).expanduser() if args.deny_file else _default_deny_file(args.project)
         deny_patterns = _load_deny_patterns(deny_path)
 
     findings = _check_tracked_files(repo, deny_patterns)
