@@ -6,7 +6,26 @@ CMD="${1:-open}"
 shift || true
 
 usage() {
-  echo "Usage: cockpit {open|switch|new-project|secret|costs|judge-calibrate|roadmap|ticket|plan|run|auto|claim|submit|release|sync|status|brief|note|lessons|abandon|dispatch|merge|events|relaunch|privacy-check|install-hooks|help}"
+  echo "Usage: cockpit {open|switch|new-project|secret|costs|judge-calibrate|roadmap|ticket|plan|run|auto|claim|submit|release|sync|status|brief|note|lessons|abandon|dispatch|merge|events|relaunch|privacy-check|install-hooks|ui|help}"
+}
+
+# Projet par défaut : default_project du premier projects.toml trouvé (même ordre que cockpit-env.sh).
+default_project() {
+  local toml="" candidat
+  for candidat in "${PROJECTS_TOML:-}" \
+      "${COCKPIT_CONFIG_DIR:-$HOME/.config/agentic-cockpit}/projects.toml" \
+      "$COCKPIT_HOME/config/projects.toml" \
+      "$COCKPIT_HOME/config/projects.example.toml"; do
+    if [ -n "$candidat" ] && [ -f "$candidat" ]; then
+      toml="$candidat"
+      break
+    fi
+  done
+  if [ -z "$toml" ]; then
+    echo "cockpit"
+    return
+  fi
+  python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb")).get("default_project") or "cockpit")' "$toml" 2>/dev/null || echo "cockpit"
 }
 
 case "$CMD" in
@@ -92,6 +111,18 @@ PY
     ;;
   install-hooks)
     exec bash "$COCKPIT_HOME/scripts/install-hooks.sh" "$@"
+    ;;
+  ui)
+    PROJ="${1:-$(default_project)}"
+    VENV="${TUI_VENV:-$HOME/.local/share/agentic-cockpit/tui-venv}"
+    if [ ! -x "$VENV/bin/python" ]; then
+      echo "Environnement de l'écran absent : création de $VENV via scripts/tui-setup.sh…" >&2
+      bash "$COCKPIT_HOME/scripts/tui-setup.sh"
+    fi
+    export COCKPIT_HOME
+    export PATH="$COCKPIT_HOME/bin:$PATH"
+    cd "$COCKPIT_HOME"
+    exec "$VENV/bin/python" -m tui.commande.app "$PROJ"
     ;;
   *)
     usage >&2

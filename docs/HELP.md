@@ -1,5 +1,11 @@
 # AGENTIC COCKPIT — AIDE
 
+## L'onglet Commande
+- Premier onglet de `cockpit open <projet>` : l'écran de pilotage des tickets, qui a le focus à l'ouverture.
+- Il se lance seul avec `cockpit ui <projet>` (sans projet : le `default_project`).
+- Premier lancement : `cockpit ui` crée l'environnement via `scripts/tui-setup.sh`.
+- Actions personnalisées : `actions.toml` (README, section « Onglet Commande »).
+
 ## Le principe
 Un ticket = une tâche bornée : fichiers autorisés (FILES_OWNED), critères, contrat.
 Un worker (agent IA) le code dans un worktree isolé, sur la branche feat/T-xxx.
