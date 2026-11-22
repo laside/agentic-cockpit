@@ -172,6 +172,19 @@ un événement `PLAN_CREATED`. Le résumé affiche une ligne compacte par ticket
 (`T-xxx [S/P2] titre (dépend de T-yyy)`) puis le total, suivi des chevauchements de fichiers
 éventuels (signalés sans bloquer la création).
 
+## Confidentialité
+
+Les mots interdits vivent hors dépôt, dans le dossier de configuration (`~/.config/agentic-cockpit`
+ou `$COCKPIT_CONFIG_DIR`). Un fichier par projet, `forbidden-words.<projet>.txt` (par exemple
+`forbidden-words.demo.txt`), est prioritaire pour ce projet ; sans lui, la liste générale
+`forbidden-words.txt` s'applique. Une expression par ligne, les lignes vides et `#` sont ignorées.
+
+Un refus indique « ligne N de <fichier> » (numéro réel, commentaires compris) et la zone fautive
+(titre, contrat, liste des fichiers), jamais le motif. `cockpit privacy-check --project <id>` applique
+la liste du projet ; le hook `pre-push` installé par `cockpit install-hooks` retrouve le projet en
+comparant la racine du dépôt aux racines de `projects.toml` (dépôt inconnu : liste générale). Les
+fichiers supprimés par un ticket ne sont pas listés dans la PR, seulement comptés.
+
 ## Multi-projets
 
 `cockpit new-project <projet> [chemin] [port]` initialise un dépôt, ses règles, son `Makefile`, ses

@@ -42,3 +42,12 @@ def config_file(name: str, cockpit_home: Path | None = None) -> Path:
     rel = Path(name)
     example_name = f"{rel.stem}.example{rel.suffix}"
     return home / "config" / rel.parent / example_name
+
+
+def forbidden_words_path(projet: str | None = None) -> Path:
+    """Liste de mots interdits : celle du projet si elle existe, sinon la liste générale."""
+    if projet:
+        specifique = config_dir() / f"forbidden-words.{projet}.txt"
+        if specifique.is_file():
+            return specifique
+    return config_dir() / "forbidden-words.txt"

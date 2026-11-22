@@ -129,9 +129,9 @@ def changed_files(wt: Path, base: str) -> list[str]:
 _GIT_WORKTREE_LOCK = threading.Lock()
 
 
-def private_text_hits(text: str) -> list[str]:
-    """Numéros de ligne des motifs de la liste privée (forbidden-words.txt) présents dans le texte."""
-    path = config_paths.config_dir() / "forbidden-words.txt"
+def private_text_matches(text: str, project: str | None = None) -> list[tuple[int, str]]:
+    """(numéro de ligne réel, nom du fichier de liste) des motifs privés présents dans le texte."""
+    path = config_paths.forbidden_words_path(project)
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -140,8 +140,13 @@ def private_text_hits(text: str) -> list[str]:
     for idx, raw in enumerate(lines, start=1):
         pat = raw.strip()
         if pat and not pat.startswith("#") and re.search(pat, text, re.IGNORECASE):
-            hits.append(f"mot-interdit#{idx}")
+            hits.append((idx, path.name))
     return hits
+
+
+def private_text_hits(text: str, project: str | None = None) -> list[str]:
+    """Numéros de ligne des motifs de la liste privée (du projet, sinon générale) présents dans le texte."""
+    return [f"mot-interdit#{n}" for n, _ in private_text_matches(text, project)]
 
 
 ALLOWED_COMMIT_EMAIL_DOMAINS = frozenset(
@@ -907,11 +912,24 @@ def abandon_ticket(db: CockpitDB, project_id: str, ticket_id: str, reason: str =
     return abandoned
 
 
+def split_deleted(wt: Path, files: list[str]) -> tuple[list[str], list[str]]:
+    """Sépare les fichiers présents dans le worktree de ceux supprimés par le ticket."""
+    kept = [f for f in files if (wt / f).exists()]
+    return kept, [f for f in files if f not in kept]
+
+
+def _files_section(modified: list[str], deleted: list[str]) -> str:
+    text = "Fichiers modifiés :\n" + ("\n".join(f"- {f}" for f in modified) or "- (aucun)")
+    if deleted:
+        text += f"\n{len(deleted)} fichier(s) supprimé(s)"
+    return text
+
+
 def _pr_only_body(
     db: CockpitDB, project_id: str, ticket_id: str, contract: str, wt: Path, base_ref: str
 ) -> str:
     """Corps de PR généré sans LLM : contrat, fichiers, diffstat, portes et coût du dernier run."""
-    modified = changed_files(wt, base_ref)
+    modified, deleted = split_deleted(wt, changed_files(wt, base_ref))
     diffstat = sh(["git", "diff", "--stat", f"{base_ref}..HEAD"], wt, check=False).stdout.strip()
     run = db.last_run(project_id, ticket_id) or {}
     gate0 = str(run.get("gate0") or "inconnu")
@@ -920,7 +938,7 @@ def _pr_only_body(
     cost_usd = float(run.get("cost_usd") or 0.0)
     return "\n\n".join([
         contract,
-        "Fichiers modifiés :\n" + ("\n".join(f"- {f}" for f in modified) or "- (aucun)"),
+        _files_section(modified, deleted),
         "Diffstat :\n" + (diffstat or "(aucune modification)"),
         f"Porte 0 : {gate0}\nPorte 1 : {gate1}",
         f"Coût du run : {cost_eur:.4f} € ({cost_usd:.4f} $)",
@@ -1015,15 +1033,17 @@ def merge_ticket(db: CockpitDB, project_id: str, ticket_id: str, approve: bool =
             if github_pr_mode:
                 body = _pr_only_body(db, project_id, ticket_id, contract, wt, integration_ref)
             else:
-                modified = changed_files(wt, integration_ref)
-                body = contract + "\n\nFichiers modifiés :\n" + "\n".join(f"- {f}" for f in modified)
-            hits = private_text_hits(title + "\n" + body)
-            if hits:
-                db.add_event(project_id, ticket_id, "PR_PRIVACY_FAIL", ", ".join(hits))
-                raise PipelineError(
-                    f"{ticket_id} : le titre ou le contrat contient un motif privé ({', '.join(hits)}) : "
-                    "rien n'est poussé. Reformuler le ticket."
-                )
+                kept, deleted = split_deleted(wt, changed_files(wt, integration_ref))
+                body = contract + "\n\n" + _files_section(kept, deleted)
+            kept, _ = split_deleted(wt, changed_files(wt, integration_ref))
+            for zone, texte in (("titre", title), ("contrat", contract), ("liste des fichiers", "\n".join(kept))):
+                matches = private_text_matches(texte, project_id)
+                if matches:
+                    n, nom = matches[0]
+                    db.add_event(project_id, ticket_id, "PR_PRIVACY_FAIL", f"ligne {n} de {nom} ({zone})")
+                    raise PipelineError(
+                        f"{ticket_id} : motif privé (ligne {n} de {nom}) dans {zone} : rien n'est poussé."
+                    )
             sh(["git", "push", "-u", remote, branch], wt)
             view = sh([gh, "pr", "view", branch, "--json", "number,url,state"], wt, check=False, timeout=60)
             try:
