@@ -150,6 +150,70 @@ class TestCommandeApp(unittest.TestCase):
 
 
 @unittest.skipUnless(TEXTUAL, "Textual non installé (voir scripts/tui-setup.sh)")
+class TestSelectionEtBascule(TestCommandeApp):
+    """La sélection ne lance rien ; Marquer prêt / Remettre en brouillon basculent au même endroit."""
+
+    def test_selection_sans_effet_sur_l_etat(self) -> None:
+        async def scenario() -> None:
+            app = self.nouvelle_app()
+            async with app.run_test(size=(180, 50)) as pilot:
+                await self.attendre(app, pilot)
+                liste = app.query_one("#tickets")
+                liste.focus()
+                for _ in range(len(app.tickets)):
+                    await pilot.press("enter")
+                    await pilot.press("down")
+                    await self.attendre(app, pilot)
+                await pilot.click("#tickets")
+                await self.attendre(app, pilot)
+                self.assertEqual(app.procs, [])
+                self.assertNotIsInstance(app.screen, app_mod.ConfirmScreen)
+                self.assertEqual(self.db.get_ticket("demo", "T-003")["state"], "DRAFT")
+                self.assertEqual(self.db.get_ticket("demo", "T-002")["state"], "READY")
+                self.assertNotIn("enter", [b.key for b in app.BINDINGS])
+
+        asyncio.run(scenario())
+
+    def test_bascule_draft_ready_draft(self) -> None:
+        cli = self.base / "cli-bascule"
+        cli.write_text(
+            f"#!{sys.executable}\nimport sys\nsys.path.insert(0, {str(ROOT / 'core')!r})\n"
+            "from pathlib import Path\nfrom pmo_db import CockpitDB\n"
+            "_, action, projet, tid = sys.argv[1:5]\n"
+            f"db = CockpitDB(Path({str(self.base / 'db' / 't.db')!r}))\n"
+            "db.update_ticket(projet, tid, state='READY' if action == 'promote' else 'DRAFT')\n",
+            encoding="utf-8",
+        )
+        cli.chmod(cli.stat().st_mode | stat.S_IXUSR)
+        patch = mock.patch.object(actions, "CLI", str(cli))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        async def scenario() -> None:
+            app = self.nouvelle_app()
+            async with app.run_test(size=(180, 50)) as pilot:
+                await self.attendre(app, pilot)
+                await app._ticket_surligne(mock.Mock(option=mock.Mock(id="T-003")))
+                await self.attendre(app, pilot)
+                self.assertEqual(self.ids_boutons(app)[0], "act-promote")
+                self.assertEqual(str(app.query_one("#act-promote", Button).label), "Marquer prêt")
+                await pilot.click("#act-promote")
+                await self.attendre(app, pilot)
+                await self.attendre(app, pilot)
+                self.assertEqual(self.db.get_ticket("demo", "T-003")["state"], "READY", app.messages)
+                self.assertEqual(self.ids_boutons(app)[0], "act-demote")
+                self.assertEqual(str(app.query_one("#act-demote", Button).label), "Remettre en brouillon")
+                await pilot.click("#act-demote")
+                await self.attendre(app, pilot)
+                await self.attendre(app, pilot)
+                self.assertEqual(self.db.get_ticket("demo", "T-003")["state"], "DRAFT")
+                self.assertEqual(self.ids_boutons(app)[0], "act-promote")
+                self.assertEqual(app.procs, [])
+
+        asyncio.run(scenario())
+
+
+@unittest.skipUnless(TEXTUAL, "Textual non installé (voir scripts/tui-setup.sh)")
 class TestBoutonsGlobaux(TestCommandeApp):
     """Un test par bouton du haut (Synchroniser, Rafraîchir, Brief, Coûts, Simulation)."""
 
@@ -384,6 +448,133 @@ class TestRafraichissementSousModale(TestBoutonsGlobaux):
     test_synchroniser_journal_puis_rafraichit = None
     test_rafraichir_recharge_sans_commande = None
     test_infos_bulles = None
+
+
+SORTIE_COUTS = """COCKPIT COSTS — projet demo
+source DB : /tmp/t.db
+
+WORKERS
+voie alpha : 2 run(s) · entrée 1200 · sortie 300 · cache 50 · 0,42 € mesuré
+voie beta : 1 run(s) · entrée 800 · sortie 100 · cache 0 · 1,10 $ équivalent API (abonnement)
+TOTAL workers : entrée 2000 · sortie 400 · cache 50 · entrée+sortie 2400
+TOTAL coût mesuré : 0,42 €
+
+ARCHITECTE
+modèle m1 : 3 message(s) · entrée 10 · sortie 20 · cache créé 0 · cache relu 5
+"""
+
+SORTIE_BRIEF = """PROJET demo — branche main
+Dernier commit : abc123 message
+TICKETS : READY 1 · GATE2 1
+READY (1) : T-002
+PROCHAIN : T-002 P1 [S] READY Titre
+COÛT DU JOUR : 0.0000 € (0 run(s))
+DERNIERS ÉVÉNEMENTS
+  10:00 T-001   CREATED          x
+"""
+
+
+@unittest.skipUnless(TEXTUAL, "Textual non installé (voir scripts/tui-setup.sh)")
+class TestFenetresModales(TestCommandeApp):
+    """Habillage commun des fenêtres : titre, Copier, Fermer, Échap, contenus mis en forme."""
+
+    def ouvrir(self, ecran, verifier) -> None:
+        async def scenario() -> None:
+            app = self.nouvelle_app()
+            async with app.run_test(size=(180, 50)) as pilot:
+                await self.attendre(app, pilot)
+                app.push_screen(ecran)
+                await pilot.pause()
+                self.assertIs(app.screen, ecran)
+                titre = str(ecran.query_one(".fenetre-titre").render())
+                self.assertIn(ecran.titre, titre)
+                self.assertIn("demo", titre)
+                ids = [b.id for b in ecran.query(Button)]
+                self.assertIn("copier", ids)
+                self.assertIn("Échap pour fermer", str(ecran.query_one(".fenetre-rappel").render()))
+                await verifier(app, pilot, ecran, ids)
+                with mock.patch.object(app, "copy_to_clipboard") as copie:
+                    await pilot.click("#copier")
+                    copie.assert_called_once_with(ecran.contenu)
+                self.assertIs(app.screen, ecran)
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertIs(app.screen, app.ecran_principal)
+
+        asyncio.run(scenario())
+
+    @staticmethod
+    async def avec_fermer(app, pilot, ecran, ids) -> None:
+        ferme = [b for b in ecran.query(Button) if str(b.label) == "Fermer"]
+        assert ferme, ids
+
+    def test_couts_datatable(self) -> None:
+        async def verifier(app, pilot, ecran, ids) -> None:
+            await self.avec_fermer(app, pilot, ecran, ids)
+            table = ecran.query_one("#couts-table", app_mod.DataTable)
+            self.assertEqual(table.row_count, 3)  # alpha, beta, total
+            self.assertEqual(len(table.columns), 7)
+            ligne_total = [str(c) for c in table.get_row_at(2)]
+            self.assertEqual(ligne_total[0], "TOTAL")
+            self.assertEqual(ligne_total[2], "0,42 €")
+            self.assertEqual(ligne_total[3], "1,10 $")
+            self.assertEqual(ligne_total[4], "2 000")
+        self.ouvrir(app_mod.SortieScreen("Coûts", SORTIE_COUTS, projet="demo", genre="costs"), verifier)
+
+    def test_couts_illisibles_en_texte(self) -> None:
+        async def verifier(app, pilot, ecran, ids) -> None:
+            self.assertFalse(ecran.query("#couts-table"))
+            self.assertIn("format inconnu", str(ecran.query_one(".fenetre-fixe").render()))
+        self.ouvrir(app_mod.SortieScreen("Coûts", "RAPPORT\nformat inconnu", projet="demo"), verifier)
+
+    def test_brief_sections(self) -> None:
+        async def verifier(app, pilot, ecran, ids) -> None:
+            await self.avec_fermer(app, pilot, ecran, ids)
+            blocs = " ".join(str(b.render()) for b in ecran.query(".fenetre-bloc"))
+            for nom in ("Branche", "Tickets", "Prochain ticket", "Événements", "Coût du jour"):
+                self.assertIn(nom, blocs)
+        self.ouvrir(app_mod.SortieScreen("Brief", SORTIE_BRIEF, projet="demo"), verifier)
+
+    def test_simulation_vide(self) -> None:
+        async def verifier(app, pilot, ecran, ids) -> None:
+            await self.avec_fermer(app, pilot, ecran, ids)
+            self.assertIn("Rien à lancer", str(ecran.query_one("#simulation-vide").render()))
+        self.ouvrir(app_mod.SortieScreen("Simulation de la boucle", "", projet="demo"), verifier)
+
+    def test_simulation_liste(self) -> None:
+        async def verifier(app, pilot, ecran, ids) -> None:
+            table = ecran.query_one("#simulation-table", app_mod.DataTable)
+            self.assertEqual([str(c) for c in table.get_row_at(1)][:3], ["2", "T-003", "beta"])
+        sortie = "T-002  alpha  a.py, b.py\nT-003  beta  c.py\n"
+        self.ouvrir(app_mod.SortieScreen("Simulation de la boucle", sortie, projet="demo"), verifier)
+
+    def test_diff_colore_et_fichiers(self) -> None:
+        diff = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+
+        async def verifier(app, pilot, ecran, ids) -> None:
+            await self.avec_fermer(app, pilot, ecran, ids)
+            self.assertIn("x.py", str(ecran.query_one("#diff-fichiers").render()))
+            self.assertIsInstance(ecran.query_one("#diff-texte").renderable, app_mod.Syntax)
+        self.ouvrir(app_mod.DiffScreen(diff, projet="demo"), verifier)
+
+    def test_confirmation_claire(self) -> None:
+        async def verifier(app, pilot, ecran, ids) -> None:
+            self.assertIn("oui", ids)
+            self.assertIn("non", ids)
+            texte = str(ecran.query_one(".fenetre-texte").render())
+            self.assertIn("T-001", texte)
+            self.assertIn("ouvre une PR sur GitHub", texte)
+        ecran = app_mod.ConfirmScreen("Confirmer : Approuver ?\n\ncockpit approve", ticket="T-001",
+                                      consequence=app_mod.CONSEQUENCES["approve"], projet="demo",
+                                      libelle="Approuver")
+        self.ouvrir(ecran, verifier)
+
+    # les tests hérités de TestCommandeApp ne sont pas rejoués ici
+    test_boutons_recalcules_selon_etat = None
+    test_approuver_ouvre_la_confirmation = None
+    test_une_seule_action_longue_a_la_fois = None
+    test_commande_introuvable_ne_plante_pas = None
+    test_filtre_a_relire_ne_montre_que_gate2 = None
 
 
 class TestNormalisation(unittest.TestCase):

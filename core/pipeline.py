@@ -772,6 +772,37 @@ def submit_ticket(db: CockpitDB, project_id: str, ticket_id: str) -> int:
     return 0
 
 
+def demote_tickets(db: CockpitDB, project_id: str, ticket_ids: list[str]) -> list[str]:
+    """Remet en brouillon (DRAFT) des tickets READY ou BLOCKED ; un seul refus annule tout."""
+    proj = db.get_project(project_id)
+    if not proj:
+        raise PipelineError(f"Projet inconnu : {project_id}")
+    unique = list(dict.fromkeys(t.strip() for t in ticket_ids if t and t.strip()))
+    if not unique:
+        raise PipelineError("Aucun identifiant de ticket fourni pour la remise en brouillon.")
+    wt_base = Path(proj["wt_tickets_dir"])
+    tickets: list[dict[str, Any]] = []
+    for ticket_id in unique:
+        ticket = db.get_ticket(project_id, ticket_id)
+        if not ticket:
+            raise PipelineError(f"Ticket inconnu : {ticket_id} (projet {project_id})")
+        if ticket["state"] not in ("READY", "BLOCKED"):
+            raise PipelineError(
+                f"{ticket_id} est à l'état {ticket['state']} (attendu : READY ou BLOCKED) : "
+                "remise en brouillon refusée."
+            )
+        if ticket.get("claimed_pid") is not None or ticket.get("lane") == "interactive":
+            raise PipelineError(f"{ticket_id} est réservé : remise en brouillon refusée.")
+        if (wt_base / ticket_id).exists():
+            raise PipelineError(f"{ticket_id} a un worktree actif : remise en brouillon refusée.")
+        tickets.append(ticket)
+    for ticket in tickets:
+        db.update_ticket(project_id, ticket["id"], state="DRAFT")
+        db.add_event(project_id, ticket["id"], "DEMOTED", f"{ticket['id']} : {ticket['state']} -> DRAFT")
+        say(f"{ticket['id']} remis en brouillon ({ticket['state']} -> DRAFT).")
+    return [t["id"] for t in tickets]
+
+
 def release_ticket(db: CockpitDB, project_id: str, ticket_id: str) -> int:
     """Relâche un ticket interactif ASSIGNED : remet à READY, libère les verrous et conserve le worktree."""
     proj = db.get_project(project_id)
@@ -1611,7 +1642,7 @@ def main(argv: list[str] | None = None) -> int:
     p_plan.add_argument("--max-tickets", type=int, default=4)
 
     p_ticket = sub.add_parser("ticket", help="Gestion des tickets (0 token)")
-    p_ticket.add_argument("action", choices=["add", "list", "show", "draft", "promote"])
+    p_ticket.add_argument("action", choices=["add", "list", "show", "draft", "promote", "demote"])
     p_ticket.add_argument("project")
     p_ticket.add_argument("title", nargs="?", default="")
     p_ticket.add_argument("more", nargs="*", default=[])
@@ -1726,6 +1757,15 @@ def main(argv: list[str] | None = None) -> int:
                     raise PipelineError("Objectif manquant : cockpit ticket draft <projet> \"objectif\" [--lane L]")
                 import drafter
                 drafter.draft_ticket(db, args.project, args.title, args.lane)
+                return 0
+            if args.action == "demote":
+                tokens = [args.project, args.title, *getattr(args, "more", [])]
+                ticket_ids = [token for token in tokens if token and re.fullmatch(r"T-\d+", token)]
+                projects = [token for token in tokens if token and not re.fullmatch(r"T-\d+", token)]
+                project = projects[0] if projects else default_project
+                if len(projects) > 1 or not ticket_ids or not project:
+                    raise PipelineError("Usage : cockpit ticket demote <projet> T-xxx T-yyy ...")
+                demote_tickets(db, project, ticket_ids)
                 return 0
             if args.action == "promote":
                 tokens = [args.project, args.title, *getattr(args, "more", [])]

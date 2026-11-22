@@ -7,6 +7,7 @@ Textual n'est utilisé que par ce module ; le cœur du cockpit reste en biblioth
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 import sys
 import time
@@ -17,6 +18,7 @@ _RACINE = Path(__file__).resolve().parents[2]
 if str(_RACINE) not in sys.path:
     sys.path.insert(0, str(_RACINE))
 
+from rich.syntax import Syntax  # noqa: E402
 from rich.text import Text  # noqa: E402
 from textual import on, work  # noqa: E402
 from textual.app import App, ComposeResult  # noqa: E402
@@ -24,7 +26,7 @@ from textual.binding import Binding  # noqa: E402
 from textual.containers import Horizontal, Vertical, VerticalScroll  # noqa: E402
 from textual.css.query import NoMatches  # noqa: E402
 from textual.screen import ModalScreen, Screen  # noqa: E402
-from textual.widgets import Button, Footer, OptionList, RichLog, Select, Static  # noqa: E402
+from textual.widgets import Button, DataTable, Footer, OptionList, RichLog, Select, Static  # noqa: E402
 from textual.widgets.option_list import Option  # noqa: E402
 
 from tui.commande import actions as actions_mod  # noqa: E402
@@ -43,6 +45,7 @@ DELAI_SORTIE = 120  # secondes max pour Brief, Coûts, Simulation
 
 # Boutons du haut dont la sortie s'affiche dans une fenêtre modale.
 ACTIONS_MODALES = {"brief", "costs", "auto_dry"}
+ACTIONS_BASCULE = {"promote", "demote"}  # DRAFT <-> READY : courte, écran rechargé aussitôt
 
 INFOS_BULLES = {
     "sync_projet": "Enregistre les PR fusionnées sur GitHub, débloque les tickets dépendants, nettoie les worktrees.",
@@ -106,70 +109,326 @@ def calculer_actions(
     return entete, du_ticket
 
 
-class ConfirmScreen(ModalScreen[bool]):
-    BINDINGS = [Binding("escape", "annuler", "Annuler")]
+# ---------- fenêtres modales ----------
+ICONES = {"brief": "📋", "costs": "💶", "auto_dry": "🔁", "sortie": "📄"}
+GENRES_PAR_TITRE = {"Brief": "brief", "Coûts": "costs", "Simulation de la boucle": "auto_dry"}
+CONSEQUENCES = {
+    "approve": "Approuve le ticket et ouvre une PR sur GitHub.",
+    "abandon": "Passe le ticket à l'état abandonné ; il ne sera plus lancé.",
+    "promote": "Passe le brouillon à l'état prêt ; la boucle pourra le lancer.",
+    "run": "Lance un worker sur la voie choisie.",
+    "sync": "Enregistre la fusion de la PR et met à jour le ticket.",
+    "sync_projet": "Enregistre les PR fusionnées et nettoie les worktrees.",
+}
+RE_VOIE = re.compile(
+    r"^voie (?P<voie>\S+) : (?P<runs>\d+) run\(s\) · entrée (?P<in>\d+) · sortie (?P<out>\d+)"
+    r" · cache (?P<cache>\d+) · (?P<cout>.*)$")
+RE_TOTAL_TOK = re.compile(r"^TOTAL workers : entrée (\d+) · sortie (\d+) · cache (\d+)")
+RE_TOTAL_EUR = re.compile(r"^TOTAL coût mesuré : ([\d,]+) €")
+RE_EUR = re.compile(r"([\d,]+) € mesuré")
+RE_USD = re.compile(r"([\d,]+) \$ équivalent API")
+RE_LANCE = re.compile(r"^(?P<id>[A-Z]+-\d+)\s{2,}(?P<voie>\S+)(?:\s{2,}(?P<fichiers>.*))?$")
+RE_FILE_BRIEF = re.compile(r"^[A-Z_0-9]+ \(\d+\) :")
 
-    def __init__(self, message: str) -> None:
+
+def _montant(texte: str | None) -> float | None:
+    return float(texte.replace(",", ".")) if texte else None
+
+
+def analyser_couts(texte: str) -> dict[str, Any] | None:
+    """Voies et totaux de « cockpit costs » ; None si la section WORKERS est illisible.
+    Euros payés, équivalent API ($) et tokens restent dans des colonnes distinctes."""
+    voies: list[dict[str, Any]] = []
+    total_tok: tuple[int, ...] | None = None
+    total_eur: float | None = None
+    for ligne in texte.splitlines():
+        ligne = ligne.strip()
+        if m := RE_VOIE.match(ligne):
+            eur, usd = RE_EUR.search(m["cout"]), RE_USD.search(m["cout"])
+            voies.append({"voie": m["voie"], "runs": int(m["runs"]), "in": int(m["in"]),
+                          "out": int(m["out"]), "cache": int(m["cache"]),
+                          "eur": _montant(eur[1] if eur else None),
+                          "usd": _montant(usd[1] if usd else None)})
+        elif m := RE_TOTAL_TOK.match(ligne):
+            total_tok = tuple(int(x) for x in m.groups())
+        elif m := RE_TOTAL_EUR.match(ligne):
+            total_eur = _montant(m[1])
+    if total_tok is None or (not voies and "aucun run enregistré" not in texte):
+        return None
+    usd_l = [v["usd"] for v in voies if v["usd"] is not None]
+    return {"voies": voies, "tokens": total_tok, "eur": total_eur or 0.0,
+            "usd": sum(usd_l) if usd_l else None, "runs": sum(v["runs"] for v in voies)}
+
+
+SECTIONS_BRIEF = [("Branche", "🌿"), ("Tickets", "🎫"), ("Prochain ticket", "➡"),
+                  ("Événements", "🕑"), ("Coût du jour", "💶")]
+
+
+def analyser_brief(texte: str) -> list[tuple[str, list[str]]] | None:
+    """Range les lignes de « cockpit brief » par section ; None si rien n'est reconnu."""
+    sections: dict[str, list[str]] = {nom: [] for nom, _ in SECTIONS_BRIEF}
+    courante, reconnu = "Branche", False
+    for brute in texte.splitlines():
+        ligne = brute.strip()
+        if not ligne:
+            continue
+        haut = ligne.upper()
+        if haut.startswith(("PROJET ", "DERNIER COMMIT", "ÉCART")):
+            courante, reconnu = "Branche", True
+        elif haut.startswith("TICKETS") or RE_FILE_BRIEF.match(ligne):
+            courante, reconnu = "Tickets", True
+        elif haut.startswith("PROCHAIN"):
+            courante, reconnu = "Prochain ticket", True
+        elif haut.startswith("COÛT DU JOUR"):
+            sections["Coût du jour"].append(ligne)
+            reconnu = True
+            continue
+        elif haut.startswith("DERNIERS ÉVÉNEMENTS"):
+            courante, reconnu = "Événements", True
+            continue
+        sections[courante].append(ligne)
+    if not reconnu:
+        return None
+    return [(nom, sections[nom]) for nom, _ in SECTIONS_BRIEF if sections[nom]]
+
+
+def analyser_simulation(texte: str) -> list[dict[str, str]]:
+    """Tickets que la boucle lancerait (ordre, ticket, voie, fichiers)."""
+    lances: list[dict[str, str]] = []
+    for ligne in texte.splitlines():
+        if m := RE_LANCE.match(ligne.strip()):
+            lances.append({"ordre": str(len(lances) + 1), "id": m["id"], "voie": m["voie"],
+                           "fichiers": m["fichiers"] or ""})
+    return lances
+
+
+def fichiers_du_diff(texte: str) -> list[str]:
+    fichiers: list[str] = []
+    for ligne in texte.splitlines():
+        if ligne.startswith("diff --git "):
+            nom = ligne.split(" b/", 1)[-1]
+        elif ligne.startswith("+++ ") and not ligne.startswith("+++ /dev/null"):
+            nom = ligne[4:].removeprefix("b/")
+        else:
+            continue
+        if nom not in fichiers:
+            fichiers.append(nom)
+    return fichiers
+
+
+def texte_titres(texte: str) -> Text:
+    """Texte à espacement fixe ; les lignes en majuscules (titres) sont mises en valeur."""
+    t = Text()
+    for ligne in texte.splitlines():
+        lettres = [c for c in ligne if c.isalpha()][:6]
+        titre = bool(lettres) and all(c.isupper() for c in lettres)
+        t.append(ligne + "\n", style="bold #88c0d0" if titre else "")
+    return t
+
+
+class FenetreModale(ModalScreen[Any]):
+    """Cadre commun : en-tête (icône, titre, projet, heure), zone défilante, pied Copier / Fermer."""
+
+    BINDINGS = [Binding("escape", "fermer", "Fermer")]
+    ID_FERMER = "fenetre-fermer"
+    ICONE = "📄"
+
+    def __init__(self, titre: str, contenu: str, projet: str = "") -> None:
         super().__init__()
-        self.message = message
+        self.titre = titre
+        self.contenu = contenu
+        self.projet = projet
+        self.heure = time.strftime("%H:%M:%S")
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="dialogue"):
-            yield Static(self.message, id="dialogue-message")
-            with Horizontal(id="dialogue-boutons"):
-                yield Button("Confirmer", id="oui", variant="warning")
-                yield Button("Annuler", id="non")
+        with Vertical(classes="fenetre"):
+            with Horizontal(classes="fenetre-entete"):
+                yield Static(Text.assemble(f"{self.ICONE}  ", (self.titre, "bold #e5f0ff"),
+                                           (f"  · {self.projet}" if self.projet else "", "#88c0d0")),
+                             classes="fenetre-titre")
+                yield Static(f"mis à jour {self.heure}", classes="fenetre-heure")
+            with VerticalScroll(classes="fenetre-defil"):
+                yield from self.corps()
+            with Horizontal(classes="fenetre-pied"):
+                yield from self.boutons()
+                yield Static("Échap pour fermer", classes="fenetre-rappel")
+
+    def corps(self) -> ComposeResult:
+        yield Static(Text(self.contenu or "(aucune sortie)"), classes="fenetre-texte")
+
+    def boutons(self) -> ComposeResult:
+        yield Button("Copier", id="copier", classes="fenetre-copier")
+        yield Button("Fermer", id=self.ID_FERMER, classes="fenetre-fermer")
+
+    @on(Button.Pressed, "#copier")
+    def _copier(self, ev: Button.Pressed) -> None:
+        ev.stop()
+        self.app.copy_to_clipboard(self.contenu)
+        self.notify("Copié dans le presse-papiers.")
+
+    @on(Button.Pressed, ".fenetre-fermer")
+    def _fermer(self, ev: Button.Pressed) -> None:
+        ev.stop()
+        self.action_fermer()
+
+    def action_fermer(self) -> None:
+        self.dismiss(None)
+
+
+class ConfirmScreen(FenetreModale):
+    BINDINGS = [Binding("escape", "annuler", "Annuler")]
+    ICONE = "⚠"
+
+    def __init__(self, message: str, ticket: str = "", consequence: str = "",
+                 projet: str = "", libelle: str = "Confirmer") -> None:
+        super().__init__("Confirmation", message, projet)
+        self.message = message
+        self.ticket = ticket
+        self.consequence = consequence
+        self.libelle = libelle
+
+    def corps(self) -> ComposeResult:
+        question, _, reste = self.message.partition("\n")
+        t = Text(question + "\n\n", style="bold #ebcb8b")
+        if self.ticket:
+            t.append("Ticket : ", style="#88c0d0")
+            t.append(self.ticket + "\n", style="bold")
+        if self.consequence:
+            t.append("Conséquence : ", style="#88c0d0")
+            t.append(self.consequence + "\n")
+        if reste.strip():
+            t.append("\n" + reste.strip() + "\n", style="#7b88a1")
+        yield Static(t, classes="fenetre-texte")
+
+    def boutons(self) -> ComposeResult:
+        yield Button("Copier", id="copier", classes="fenetre-copier")
+        yield Button(self.libelle, id="oui", variant="warning", classes="fenetre-oui")
+        yield Button("Annuler", id="non", classes="fenetre-non")
 
     @on(Button.Pressed, "#oui")
-    def _oui(self) -> None:
+    def _oui(self, ev: Button.Pressed) -> None:
+        ev.stop()
         self.dismiss(True)
 
     @on(Button.Pressed, "#non")
-    def _non(self) -> None:
+    def _non(self, ev: Button.Pressed) -> None:
+        ev.stop()
         self.dismiss(False)
 
     def action_annuler(self) -> None:
         self.dismiss(False)
 
+    def action_fermer(self) -> None:
+        self.dismiss(False)
 
-class DiffScreen(ModalScreen[None]):
+
+class DiffScreen(FenetreModale):
     BINDINGS = [Binding("escape", "fermer", "Fermer"), Binding("q", "fermer", "Fermer")]
+    ID_FERMER = "diff-fermer"
+    ICONE = "🧾"
 
-    def __init__(self, contenu: str) -> None:
-        super().__init__()
-        self.contenu = contenu
+    def __init__(self, contenu: str, projet: str = "", titre: str = "Diff du worktree") -> None:
+        super().__init__(titre, contenu, projet)
 
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(id="diff-boite"):
-            yield Static(Text(self.contenu or "(diff vide)"), id="diff-texte")
+    def corps(self) -> ComposeResult:
+        if not self.contenu.strip():
+            yield Static("(diff vide)", classes="fenetre-texte")
+            return
+        fichiers = fichiers_du_diff(self.contenu)
+        t = Text(f"Fichiers modifiés ({len(fichiers)})\n", style="bold #88c0d0")
+        for f in fichiers or ["(aucun fichier repéré)"]:
+            t.append(f"  • {f}\n")
+        yield Static(t, id="diff-fichiers", classes="fenetre-section")
+        yield Static(Syntax(self.contenu, "diff", theme="monokai", background_color="#0f1a2e"),
+                     id="diff-texte", classes="fenetre-texte")
 
-    def action_fermer(self) -> None:
-        self.dismiss(None)
+
+def _eur(v: float | None, gras: bool = False) -> Text:
+    if v is None:
+        return Text("—", style="grey50", justify="right")
+    couleur = "#ebcb8b" if v > 0 else "#a3be8c"
+    return Text(f"{v:.2f} €".replace(".", ","), justify="right", style=f"bold {couleur}" if gras else couleur)
 
 
-class SortieScreen(ModalScreen[None]):
-    """Sortie d'une commande du haut (Brief, Coûts, Simulation), défilante."""
+def _usd(v: float | None, gras: bool = False) -> Text:
+    if v is None:
+        return Text("—", style="grey50", justify="right")
+    return Text(f"{v:.2f} $".replace(".", ","), justify="right", style="bold #b48ead" if gras else "#b48ead")
 
-    BINDINGS = [Binding("escape", "fermer", "Fermer")]
 
-    def __init__(self, titre: str, contenu: str) -> None:
-        super().__init__()
-        self.titre = titre
-        self.contenu = contenu
+def _tok(v: int, gras: bool = False) -> Text:
+    return Text(f"{v:,}".replace(",", " "), justify="right", style="bold" if gras else "")
 
-    def compose(self) -> ComposeResult:
-        with Vertical(id="sortie-boite"):
-            yield Static(Text(self.titre, style="bold"), id="sortie-titre")
-            with VerticalScroll(id="sortie-defil"):
-                yield Static(Text(self.contenu or "(aucune sortie)"), id="sortie-texte")
-            yield Button("Fermer", id="sortie-fermer")
 
-    @on(Button.Pressed, "#sortie-fermer")
-    def _fermer(self) -> None:
-        self.dismiss(None)
+class SortieScreen(FenetreModale):
+    """Sortie d'une commande du haut (Brief, Coûts, Simulation), mise en forme si possible."""
 
-    def action_fermer(self) -> None:
-        self.dismiss(None)
+    ID_FERMER = "sortie-fermer"
+
+    def __init__(self, titre: str, contenu: str, projet: str = "", genre: str = "") -> None:
+        super().__init__(titre, contenu, projet)
+        self.genre = genre or GENRES_PAR_TITRE.get(titre, "sortie")
+        self.ICONE = ICONES.get(self.genre, "📄")
+        self.erreur = contenu.startswith(("Erreur", "Commande introuvable", "Échec"))
+
+    def corps(self) -> ComposeResult:
+        if not self.erreur and self.genre == "costs":
+            yield from self._corps_couts()
+        elif not self.erreur and self.genre == "brief":
+            yield from self._corps_brief()
+        elif not self.erreur and self.genre == "auto_dry":
+            yield from self._corps_simulation()
+        else:
+            classes = "fenetre-texte fenetre-erreur" if self.erreur else "fenetre-texte"
+            yield Static(Text(self.contenu or "(aucune sortie)"), classes=classes)
+
+    def _corps_couts(self) -> ComposeResult:
+        res = analyser_couts(self.contenu)
+        if res is None:
+            yield Static(texte_titres(self.contenu or "(aucune sortie)"), classes="fenetre-texte fenetre-fixe")
+            return
+        yield Static(Text("Workers par voie — euros payés, équivalent API et tokens ne s'additionnent jamais",
+                          style="bold #88c0d0"), classes="fenetre-section")
+        table: DataTable = DataTable(id="couts-table", zebra_stripes=True, cursor_type="row")
+        table.add_columns("Voie", "Runs", "Payé (€)", "Équiv. API ($)",
+                          "Tokens entrée", "Tokens sortie", "Tokens cache")
+        for v in res["voies"]:
+            table.add_row(Text(v["voie"], style="#88c0d0"), _tok(v["runs"]), _eur(v["eur"]), _usd(v["usd"]),
+                          _tok(v["in"]), _tok(v["out"]), _tok(v["cache"]))
+        tin, tout, tcache = res["tokens"]
+        table.add_row(Text("TOTAL", style="bold"), _tok(res["runs"], True), _eur(res["eur"], True),
+                      _usd(res["usd"], True), _tok(tin, True), _tok(tout, True), _tok(tcache, True))
+        yield table
+        _, _, apres = self.contenu.partition("TOTAL coût mesuré")
+        suite = apres.partition("\n")[2].strip("\n")
+        if suite.strip():
+            yield Static(texte_titres(suite), classes="fenetre-texte fenetre-fixe")
+
+    def _corps_brief(self) -> ComposeResult:
+        sections = analyser_brief(self.contenu)
+        if sections is None:
+            yield Static(Text(self.contenu or "(aucune sortie)"), classes="fenetre-texte")
+            return
+        icones = dict(SECTIONS_BRIEF)
+        for nom, lignes in sections:
+            t = Text(f"{icones[nom]}  {nom}\n", style="bold #88c0d0")
+            t.append("\n".join(lignes))
+            yield Static(t, classes="fenetre-bloc")
+
+    def _corps_simulation(self) -> ComposeResult:
+        lances = analyser_simulation(self.contenu)
+        if not lances:
+            yield Static(Text("✓ Rien à lancer : aucun ticket exécutable dans la file.", style="bold #a3be8c"),
+                         id="simulation-vide", classes="fenetre-section")
+            return
+        yield Static(Text(f"{len(lances)} ticket(s) seraient lancés, dans cet ordre :", style="bold #88c0d0"),
+                     classes="fenetre-section")
+        table: DataTable = DataTable(id="simulation-table", zebra_stripes=True, cursor_type="row")
+        table.add_columns("Ordre", "Ticket", "Voie", "Fichiers")
+        for x in lances:
+            table.add_row(Text(x["ordre"], justify="right"), Text(x["id"], style="bold"),
+                          Text(x["voie"], style="#88c0d0"), x["fichiers"])
+        yield table
 
 
 class CommandeApp(App[None]):
@@ -179,7 +438,6 @@ class CommandeApp(App[None]):
         Binding("q", "quit", "Quitter"),
         Binding("r", "rafraichir", "Rafraîchir"),
         Binding("f", "filtre_suivant", "Filtre suivant"),
-        Binding("enter", "action_principale", "Action principale"),
     ]
 
     def __init__(
@@ -410,10 +668,6 @@ class CommandeApp(App[None]):
                 async with self._verrou:
                     await self._maj_boutons()
 
-    @on(OptionList.OptionSelected, "#tickets")
-    def _ticket_valide(self) -> None:
-        self.action_action_principale()
-
     @on(Select.Changed, "#voie")
     async def _voie_changee(self, ev: Select.Changed) -> None:
         self.voie = "" if ev.value is Select.BLANK else str(ev.value)
@@ -448,12 +702,6 @@ class CommandeApp(App[None]):
     def action_filtre_suivant(self) -> None:
         self._choisir_filtre(NOMS_FILTRES[(NOMS_FILTRES.index(self.filtre) + 1) % len(NOMS_FILTRES)])
 
-    def action_action_principale(self) -> None:
-        for a in self.actions_ticket:
-            if not self._desactive(a):
-                self.demander(a)
-                return
-
     # ---------- exécution ----------
     def demander(self, a: Action) -> None:
         if self._desactive(a):
@@ -463,7 +711,11 @@ class CommandeApp(App[None]):
             def retour(ok: bool | None) -> None:
                 if ok:
                     self.executer(a)
-            self.push_screen(ConfirmScreen(f"Confirmer : {a.libelle} ?\n\n{' '.join(a.argv)}"), retour)
+            du_ticket = any(x.id == a.id for x in self.actions_ticket)
+            self.push_screen(ConfirmScreen(f"Confirmer : {a.libelle} ?\n\n{' '.join(a.argv)}",
+                                           ticket=(self.ticket_id or "") if du_ticket else "",
+                                           consequence=CONSEQUENCES.get(a.id) or info_bulle(a),
+                                           projet=self.projet, libelle=a.libelle), retour)
         else:
             self.executer(a)
 
@@ -477,6 +729,10 @@ class CommandeApp(App[None]):
         if a.id == "rafraichir":
             self._noter("Rafraîchissement demandé.")
             self.action_rafraichir()
+            return
+        if a.id in ACTIONS_BASCULE:
+            self._noter(f"Lancé : {a.libelle}")
+            self._basculer(a)
             return
         if a.id in ACTIONS_MODALES:
             self._noter(f"Lancé : {a.libelle}")
@@ -517,6 +773,22 @@ class CommandeApp(App[None]):
         if resync:
             self.action_rafraichir()  # Synchroniser : écran rechargé à la fin
 
+    @work(thread=True, group="bascule")
+    def _basculer(self, a: Action) -> None:
+        """Marquer prêt / Remettre en brouillon : exécution courte, puis rafraîchissement immédiat."""
+        try:
+            res = subprocess.run(a.argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                 errors="replace", timeout=DELAI_SORTIE, check=False)
+            sortie = (res.stdout + res.stderr).strip()
+            ligne = (f"Terminé : {a.libelle} (code 0)" if res.returncode == 0
+                     else f"Erreur : {a.libelle} (code {res.returncode}) {sortie}")
+        except FileNotFoundError:
+            ligne = f"Commande introuvable : {a.argv[0]}"
+        except Exception as exc:  # noqa: BLE001 - jamais de plantage de l'écran
+            ligne = f"Échec de « {a.libelle} » : {exc}"
+        self.call_from_thread(self._noter, ligne)
+        self.call_from_thread(self.action_rafraichir)
+
     @work(thread=True, group="sortie")
     def _afficher_sortie(self, a: Action) -> None:
         """Exécute une commande courte, puis montre sa sortie dans une fenêtre modale."""
@@ -535,11 +807,11 @@ class CommandeApp(App[None]):
             ligne = texte = f"Erreur : {a.libelle} dépasse {DELAI_SORTIE} s, interrompue."
         except Exception as exc:  # noqa: BLE001 - jamais de plantage de l'écran
             ligne = texte = f"Échec de « {a.libelle} » : {exc}"
-        self.call_from_thread(self._montrer_sortie, a.libelle, texte, ligne)
+        self.call_from_thread(self._montrer_sortie, a.libelle, texte, ligne, a.id)
 
-    def _montrer_sortie(self, titre: str, texte: str, ligne: str) -> None:
+    def _montrer_sortie(self, titre: str, texte: str, ligne: str, genre: str = "") -> None:
         self._noter(ligne)
-        self.push_screen(SortieScreen(titre, texte))
+        self.push_screen(SortieScreen(titre, texte, projet=self.projet, genre=genre))
 
     @work(thread=True, group="diff")
     def _afficher_diff(self, a: Action) -> None:
@@ -548,7 +820,7 @@ class CommandeApp(App[None]):
             texte = res.stdout if res.returncode == 0 else f"Erreur git ({res.returncode}) :\n{res.stderr}"
         except Exception as exc:  # noqa: BLE001
             texte = f"Diff impossible : {exc}"
-        self.call_from_thread(self.push_screen, DiffScreen(texte))
+        self.call_from_thread(self.push_screen, DiffScreen(texte, projet=self.projet))
 
     # ---------- journal ----------
     def _noter(self, message: str) -> None:

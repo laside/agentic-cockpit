@@ -30,29 +30,35 @@ Screen {
 
 #journal { height: 10; border: round #3b4252; }
 
-ConfirmScreen, DiffScreen, SortieScreen { align: center middle; }
-#sortie-boite {
-    width: 90%;
-    height: 90%;
-    padding: 0 1;
-    border: thick #81a1c1;
-    background: #10131a;
+/* ---------- fenêtres modales ---------- */
+ConfirmScreen, DiffScreen, SortieScreen {
+    align: center middle;
+    background: #000000 60%;
 }
-#sortie-titre { height: 1; color: #81a1c1; }
-#sortie-defil { height: 1fr; }
-#sortie-texte { padding: 0 1; }
-#sortie-fermer { margin-top: 1; }
-#dialogue {
-    width: 70;
-    height: auto;
+.fenetre {
+    width: 85%;
+    height: 80%;
     padding: 1 2;
-    border: thick #ebcb8b;
-    background: #1b2030;
+    border: round #81a1c1;
+    background: #0f1a2e;
 }
-#dialogue-boutons { height: auto; margin-top: 1; }
-#diff-boite {
-    width: 90%;
-    height: 90%;
-    border: thick #81a1c1;
-    background: #10131a;
+.fenetre-entete { height: 1; margin-bottom: 1; }
+.fenetre-titre { width: 1fr; }
+.fenetre-heure { width: auto; color: #7b88a1; }
+.fenetre-defil { height: 1fr; background: #0f1a2e; scrollbar-color: #81a1c1; }
+.fenetre-texte { padding: 0 1; }
+.fenetre-fixe { color: #d8dee9; }
+.fenetre-erreur { color: #bf616a; }
+.fenetre-section { padding: 0 1; margin-bottom: 1; }
+.fenetre-bloc {
+    padding: 0 1;
+    margin-bottom: 1;
+    border-left: tall #81a1c1;
+    background: #13213a;
 }
+.fenetre DataTable { height: auto; margin: 0 1 1 1; background: #0f1a2e; }
+.fenetre-pied { height: 3; margin-top: 1; }
+.fenetre-pied Button { margin-right: 1; min-width: 10; }
+.fenetre-copier, .fenetre-non { background: #3b4252; }
+.fenetre-oui { text-style: bold; }
+.fenetre-rappel { width: 1fr; height: 3; content-align: right middle; color: #7b88a1; }
