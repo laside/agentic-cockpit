@@ -1,0 +1,47 @@
+Screen {
+    background: #10131a;
+    color: #d8dee9;
+}
+
+#entete {
+    height: auto;
+    padding: 0 1;
+    background: #1b2030;
+}
+#entete Button, #boutons-ticket Button, #filtres Button {
+    margin-right: 1;
+    min-width: 8;
+}
+#barre-projet { height: 3; }
+#projet { width: 28; }
+#boutons-globaux { height: auto; }
+
+#corps { height: 1fr; }
+#gauche { width: 50%; border: round #3b4252; }
+#droite { width: 50%; }
+#filtres { height: auto; }
+#tickets { height: 1fr; }
+
+#detail-zone { height: 1fr; border: round #3b4252; }
+#detail { padding: 0 1; }
+#actions-zone { height: auto; max-height: 14; border: round #3b4252; padding: 0 1; }
+#voie { width: 30; }
+#boutons-ticket { height: auto; }
+
+#journal { height: 10; border: round #3b4252; }
+
+ConfirmScreen, DiffScreen { align: center middle; }
+#dialogue {
+    width: 70;
+    height: auto;
+    padding: 1 2;
+    border: thick #ebcb8b;
+    background: #1b2030;
+}
+#dialogue-boutons { height: auto; margin-top: 1; }
+#diff-boite {
+    width: 90%;
+    height: 90%;
+    border: thick #81a1c1;
+    background: #10131a;
+}

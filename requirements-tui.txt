@@ -1,0 +1,3 @@
+# Dépendance de l'écran Textual uniquement (le cœur du cockpit reste en bibliothèque standard).
+# Installée dans un environnement virtuel dédié par scripts/tui-setup.sh.
+textual==1.0.0
