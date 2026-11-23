@@ -108,11 +108,17 @@ def plan_batch(
         )
         lane = lane_info["lane"]
 
+        overflow = False
         if provider_limits is None:
             if lane.startswith("agy_"):
                 if agy_taken:
-                    continue
-                agy_taken = True
+                    if lane == "agy_standard" and db.is_mistral_ready():
+                        lane = "mistral_vibe"
+                        overflow = True
+                    else:
+                        continue
+                else:
+                    agy_taken = True
         else:
             provider = lp.get(lane, lane)
             if provider in provider_limits:
@@ -120,10 +126,26 @@ def plan_batch(
                     active_by_provider.get(provider, 0) + batch_by_provider.get(provider, 0)
                     >= provider_limits[provider]
                 ):
-                    continue
+                    if lane == "agy_standard" and db.is_mistral_ready():
+                        ms_prov = lp.get("mistral_vibe", "mistral")
+                        if (
+                            ms_prov not in provider_limits
+                            or active_by_provider.get(ms_prov, 0) + batch_by_provider.get(ms_prov, 0)
+                            < provider_limits[ms_prov]
+                        ):
+                            lane = "mistral_vibe"
+                            provider = ms_prov
+                            overflow = True
+                        else:
+                            continue
+                    else:
+                        continue
             batch_by_provider[provider] = batch_by_provider.get(provider, 0) + 1
 
-        batch.append({"id": ticket_id, "lane": lane, "files": files})
+        item: dict[str, Any] = {"id": ticket_id, "lane": lane, "files": files}
+        if overflow:
+            item["overflow"] = True
+        batch.append(item)
         batch_files.update(files)
 
     return batch

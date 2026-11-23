@@ -6,11 +6,13 @@ porte d'intégration et fusion avec déblocage des dépendants.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 COCKPIT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(COCKPIT_ROOT / "core"))
@@ -762,6 +764,63 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(called, ["T-090"])
         finally:
             pipeline.run_ticket = orig_run  # type: ignore[assignment]
+
+    def test_load_env_file_and_run_worker_injects_cockpit_secrets(self) -> None:
+        """run_worker charge .env.cockpit sans écraser os.environ ni extra_env."""
+        env_file = Path(self.tmp.name) / ".env.cockpit"
+        env_file.write_text(
+            "# commentaire\nMISTRAL_API_KEY='fake-mistral-key'\nEXISTING_VAR=from_file\n",
+            encoding="utf-8",
+        )
+        parsed = pipeline._load_env_file(env_file)
+        self.assertEqual(parsed["MISTRAL_API_KEY"], "fake-mistral-key")
+        self.assertEqual(parsed["EXISTING_VAR"], "from_file")
+
+        wt = Path(self.tmp.name) / "wt"
+        wt.mkdir()
+        log_path = Path(self.tmp.name) / "worker.log"
+        orig_cockpit_home = pipeline.COCKPIT_HOME
+        try:
+            pipeline.COCKPIT_HOME = Path(self.tmp.name)
+            with mock.patch.dict(os.environ, {"EXISTING_VAR": "from_os"}):
+                code, _ = pipeline.run_worker(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import os; print(os.environ.get('MISTRAL_API_KEY', '')); print(os.environ.get('EXISTING_VAR', ''))",
+                    ],
+                    wt,
+                    log_path,
+                    timeout=10,
+                    stream=False,
+                )
+        finally:
+            pipeline.COCKPIT_HOME = orig_cockpit_home
+        self.assertEqual(code, 0)
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines, ["fake-mistral-key", "from_os"])
+
+    def test_cmd_auto_passes_lane_override_on_m_overflow(self) -> None:
+        """cmd_auto transmet lane_override='mistral_vibe' pour un second ticket M en débordement."""
+        self.db.set_mistral_key_active(True)
+        self.db.upsert_ticket("demo", "T-M1", "M1", milestone_id="M1", priority="P1", complexity="M", files_owned=["a.py"])
+        self.db.upsert_ticket("demo", "T-M2", "M2", milestone_id="M1", priority="P2", complexity="M", files_owned=["b.py"])
+        calls: list[tuple[str, str]] = []
+
+        def fake_run(db: pmo_db.CockpitDB, project_id: str, ticket_id: str, **kwargs: object) -> int:
+            calls.append((ticket_id, str(kwargs.get("lane_override", ""))))
+            db.update_ticket(project_id, ticket_id, state="GATE2")
+            return 0
+
+        orig_run = pipeline.run_ticket
+        try:
+            pipeline.run_ticket = fake_run  # type: ignore[assignment]
+            code = pipeline.main(["auto", "demo", "--slots", "2", "--max-tickets", "2"])
+        finally:
+            pipeline.run_ticket = orig_run  # type: ignore[assignment]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(dict(calls), {"T-M1": "", "T-M2": "mistral_vibe"})
 
 
 if __name__ == "__main__":

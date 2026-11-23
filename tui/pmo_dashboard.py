@@ -62,11 +62,15 @@ def render_pmo_screen(db: CockpitDB, project_id: str, width: int = 105) -> str:
     claude = quotas.get("claude", {})
     ds = quotas.get("deepseek", {})
     ms = quotas.get("mistral", {})
-    ms_status = (
-        f"{ms.get('monthly_spent_eur', 0):.2f}€/{ms.get('monthly_limit_eur', 25):.0f}€ (ACTIF)"
-        if ms.get("api_key_configured")
-        else "EN VEILLE (Clé absente -> Route DeepSeek)"
-    )
+    ms_limit = float(ms.get("monthly_limit_eur") or 0.0)
+    ms_spent = float(ms.get("monthly_spent_eur") or 0.0)
+    if ms.get("api_key_configured"):
+        if ms_limit > 0.0 and ms_spent > 0.0:
+            ms_status = f"{ms_spent:.2f}€/{ms_limit:.0f}€ (ACTIF)"
+        else:
+            ms_status = "Forfait (ACTIF)"
+    else:
+        ms_status = "EN VEILLE (Clé absente -> Route DeepSeek)"
 
     lines.append(
         f"{C_DIM}Quotas 5h :{C_RESET} AGY Pro [{render_bar(agy.get('window_used_pct', 0), 8)}] {agy.get('window_used_pct', 0):.0f}% (Argon Prêt) │ "
@@ -74,7 +78,7 @@ def render_pmo_screen(db: CockpitDB, project_id: str, width: int = 105) -> str:
     )
     lines.append(
         f"{C_DIM}Crédits API :{C_RESET} DeepSeek {C_GREEN}{ds.get('monthly_spent_eur', 0):.2f}€/{ds.get('monthly_limit_eur', 20):.0f}€{C_RESET} "
-        f"(Cible {ds.get('daily_target_eur', 0.65):.2f}€/j) │ Mistral 25€ : {C_YELLOW}{ms_status}{C_RESET}"
+        f"(Cible {ds.get('daily_target_eur', 0.65):.2f}€/j) │ Mistral : {C_YELLOW}{ms_status}{C_RESET}"
     )
     lines.append(
         f"{C_DIM}GPU locaux (0 €) :{C_RESET} Ollama"

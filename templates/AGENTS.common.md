@@ -9,7 +9,7 @@
 ## Travail à plusieurs CLI
 - Aucune messagerie entre agents : lis l'état partagé avec `cockpit status __PROJECT_ID__`.
 - Chef de chantier (agy, DeepSeek) : `cockpit claim T-xxx __PROJECT_ID__ --as <agy|deepseek>`, travaille dans le WORKTREE affiché, puis `cockpit submit T-xxx __PROJECT_ID__`.
-- Délègue une partie : commite le chantier, puis `cockpit ticket add __PROJECT_ID__ "titre" --parent T-xxx --files ... --accept ...` (fichiers pris dans ceux du chantier, 4 sous-tickets ouverts au plus), puis `cockpit run T-yyy __PROJECT_ID__ [--lane <voie>]` ou `cockpit auto __PROJECT_ID__ --parent T-xxx --auto-merge` ; choisis la voie la moins chère qui suffit.
+- Délègue une partie : commite le chantier, puis `cockpit ticket add __PROJECT_ID__ "titre" --parent T-xxx --files ... --accept ...` (fichiers pris dans ceux du chantier, 4 sous-tickets ouverts au plus), puis `cockpit run T-yyy __PROJECT_ID__ [--lane <voie>]` ou `cockpit auto __PROJECT_ID__ --parent T-xxx --auto-merge` ; privilégie `mistral_vibe` (abonnement forfaitaire parallèle, `max_parallel = 2`, prioritaire sur XS/S et débordement sur M) avant `deepseek_coder` (facturé à l'usage).
 - Intègre un sous-ticket : `cockpit merge T-yyy __PROJECT_ID__`.
 - Signale un changement d'interface : `cockpit note T-xxx __PROJECT_ID__ "..."`.
 - Seul l'architecte (Claude) fusionne un chantier dans la branche principale.

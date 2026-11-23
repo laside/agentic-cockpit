@@ -67,7 +67,7 @@ cp config/runners.example.toml  ~/.config/agentic-cockpit/runners.toml
 
 - `projects.toml` : registre des projets, chemins de worktrees, branche par défaut, ports, et
   `merge_mode` (`"local"` par défaut, `"github"`, ou `"github_pr"`).
-- `runners.toml` : une entrée par voie (commande `argv`, quotas, délais, Porte 1 statique).
+- `runners.toml` : une entrée par voie (commande `argv`, quotas, délais, Porte 1 statique). La voie `mistral_vibe` (abonnement forfaitaire, `max_parallel = 2`) est prioritaire sur `XS`/`S` et prend en parallèle le débordement des tickets `M` quand `agy` est occupé (et pour les sous-tickets `--parent` via `cockpit run --lane mistral_vibe` ou `cockpit auto --parent`).
 - `config/lanes.yaml` : budgets et seuils du Gouverneur de quotas.
 - `forbidden-words.txt` : liste privée de motifs (une expression régulière par ligne, `#` pour les
   commentaires) lue par `cockpit privacy-check`. Placez-la dans la surcouche

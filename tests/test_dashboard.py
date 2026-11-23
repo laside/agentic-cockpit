@@ -172,6 +172,13 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(list(params), ["db", "project_id", "width"])
         self.assertEqual(params["width"].default, 105)
 
+    def test_mistral_affiche_forfait_actif_ou_veille(self) -> None:
+        out_off = strip_ansi(pmo_dashboard.render_pmo_screen(self.db, "demo", width=105))
+        self.assertIn("EN VEILLE", out_off)
+        self.db.set_mistral_key_active(True)
+        out_on = strip_ansi(pmo_dashboard.render_pmo_screen(self.db, "demo", width=105))
+        self.assertIn("Mistral : Forfait (ACTIF)", out_on)
+
 
 if __name__ == "__main__":
     unittest.main()
