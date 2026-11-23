@@ -218,7 +218,7 @@ class MultiCliTests(unittest.TestCase):
 
     def test_plan_batch_provider_limits(self) -> None:
         """plan_batch respecte provider_limits (en comptant ceux en cours, absent = illimité, None = règle agy_)."""
-        self.db.set_mistral_key_active(True)
+        self.db.set_mistral_key_active(False)
         # T-A1 est déjà en cours (ASSIGNED) sur agy_standard (provider agy)
         self.db.upsert_ticket(
             "demo", "T-A1", "AGY en cours", priority="P0", complexity="M", state="ASSIGNED", files_owned=["a1.py"]
@@ -229,19 +229,12 @@ class MultiCliTests(unittest.TestCase):
         self.db.upsert_ticket(
             "demo", "T-A2", "AGY prêt", priority="P0", complexity="M", state="READY", files_owned=["a2.py"]
         )
-        # T-D1, T-D2 sont READY sur deepseek_coder (complexity="S")
+        # T-D1, T-D2 sont READY sur deepseek_coder (complexity="S", mistral inactif)
         self.db.upsert_ticket(
             "demo", "T-D1", "DS 1", priority="P1", complexity="S", state="READY", files_owned=["d1.py"]
         )
         self.db.upsert_ticket(
             "demo", "T-D2", "DS 2", priority="P1", complexity="S", state="READY", files_owned=["d2.py"]
-        )
-        # T-M1, T-M2 sont READY sur mistral_vibe (complexity="XS")
-        self.db.upsert_ticket(
-            "demo", "T-M1", "Mistral 1", priority="P2", complexity="XS", state="READY", files_owned=["m1.py"]
-        )
-        self.db.upsert_ticket(
-            "demo", "T-M2", "Mistral 2", priority="P2", complexity="XS", state="READY", files_owned=["m2.py"]
         )
 
         lane_providers = {
@@ -252,14 +245,34 @@ class MultiCliTests(unittest.TestCase):
         }
         provider_limits = {"agy": 1, "deepseek": 1}
 
-        # Avec agy=1 (déjà 1 ASSIGNED -> 0 possible), deepseek=1 (1 seul pris), mistral absent (illimité -> 2 pris)
+        # Avec agy=1 (déjà 1 ASSIGNED -> 0 possible), deepseek=1 (1 seul pris)
         batch = scheduler.plan_batch(
             self.db, "demo", slots=4, provider_limits=provider_limits, lane_providers=lane_providers
         )
-        self.assertEqual([b["id"] for b in batch], ["T-D1", "T-M1", "T-M2"])
+        self.assertEqual([b["id"] for b in batch], ["T-D1"])
+
+        # Avec Mistral actif et mistral=2 : T-D1, T-D2 (S) partent sur mistral_vibe (limite 2 atteinte),
+        # T-A2 (M), T-M1, T-M2 (XS) attendent le lot suivant.
+        self.db.set_mistral_key_active(True)
+        self.db.upsert_ticket(
+            "demo", "T-M1", "Mistral 1", priority="P2", complexity="XS", state="READY", files_owned=["m1.py"]
+        )
+        self.db.upsert_ticket(
+            "demo", "T-M2", "Mistral 2", priority="P2", complexity="XS", state="READY", files_owned=["m2.py"]
+        )
+        batch_ms = scheduler.plan_batch(
+            self.db,
+            "demo",
+            slots=4,
+            provider_limits={"agy": 1, "deepseek": 1, "mistral": 2},
+            lane_providers=lane_providers,
+        )
+        self.assertEqual([b["id"] for b in batch_ms], ["T-D1", "T-D2"])
+        self.assertTrue(all(b["lane"] == "mistral_vibe" for b in batch_ms))
 
         # Si provider_limits est None : comportement historique (T-A1 déjà ASSIGNED n'empêche pas T-A2 dans le lot,
-        # mais un seul agy_* par lot, et deepseek n'est pas limité à 1)
+        # mais un seul agy_* par lot)
+        self.db.set_mistral_key_active(False)
         self.db.upsert_ticket(
             "demo", "T-A3", "AGY prêt 2", priority="P0", complexity="L", state="READY", files_owned=["a3.py"]
         )

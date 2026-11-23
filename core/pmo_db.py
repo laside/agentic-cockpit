@@ -233,7 +233,7 @@ class CockpitDB:
                 ("claude", 0.0, 0.0, 0.0, 0.0, 0.0, 1),
                 ("agy", 0.0, 0.0, 0.0, 0.0, 0.0, 1),
                 ("deepseek", 0.0, 0.0, 20.0, 0.0, 0.65, 1),
-                ("mistral", 0.0, 0.0, 25.0, 0.0, 0.83, 0),
+                ("mistral", 0.0, 0.0, 0.0, 0.0, 0.0, 0),
             ]
             for prov, w_pct, m_spent, m_lim, d_spent, d_targ, key_ok in defaults:
                 conn.execute(
@@ -620,6 +620,14 @@ class CockpitDB:
                 (1 if active else 0,),
             )
 
+    def is_mistral_ready(self) -> bool:
+        with self._connect() as conn:
+            ms = conn.execute("SELECT * FROM quota_state WHERE provider = 'mistral'").fetchone()
+        if not ms or not bool(ms["api_key_configured"]):
+            return False
+        limit = float(ms["monthly_limit_eur"] or 0.0)
+        return limit <= 0.0 or float(ms["monthly_spent_eur"] or 0.0) < limit * 0.95
+
     def update_quota_usage(
         self,
         provider: str,
@@ -655,7 +663,10 @@ class CockpitDB:
         ds = q_rows["deepseek"]
         ms = q_rows["mistral"]
 
-        mistral_ready = bool(ms["api_key_configured"]) and (ms["monthly_spent_eur"] < ms["monthly_limit_eur"] * 0.95)
+        ms_limit = float(ms.get("monthly_limit_eur") or 0.0)
+        mistral_ready = bool(ms["api_key_configured"]) and (
+            ms_limit <= 0.0 or float(ms["monthly_spent_eur"] or 0.0) < ms_limit * 0.95
+        )
         deepseek_ready = ds["monthly_spent_eur"] < ds["monthly_limit_eur"] * 0.95
         agy_std_ok = agy["window_used_pct"] < 60.0
         agy_argon_ok = agy["window_used_pct"] < 88.0
@@ -678,7 +689,7 @@ class CockpitDB:
                     "tdd_prep": "nas-gemma4-32k",
                     "gate0_fixer": "local-small (RTX 3070)",
                     "gate1_audit": "nas-gemma4-32k",
-                    "reason": "Mistral Vibe 25€ (sans fenêtre)",
+                    "reason": "Mistral Vibe (abonnement forfaitaire, 0 € marginal)",
                 }
             if deepseek_ready:
                 return {
@@ -691,14 +702,14 @@ class CockpitDB:
                 }
 
         if complexity == "S":
-            if mistral_ready and (ds["daily_spent_eur"] >= ds["daily_target_eur"] or not deepseek_ready):
+            if mistral_ready:
                 return {
                     "lane": "mistral_vibe",
                     "cli": "vibe",
                     "tdd_prep": "nas-gemma4-32k",
                     "gate0_fixer": "local-small (RTX 3070)",
                     "gate1_audit": "nas-gemma4-32k",
-                    "reason": "Lissage budget -> Mistral Vibe 25€",
+                    "reason": "Mistral Vibe (abonnement forfaitaire, prioritaire avant DeepSeek)",
                 }
             if deepseek_ready:
                 return {
@@ -727,7 +738,7 @@ class CockpitDB:
                     "tdd_prep": "nas-gemma4-32k",
                     "gate0_fixer": "local-small (RTX 3070)",
                     "gate1_audit": "nas-gemma4-32k",
-                    "reason": f"Bouclier AGY ({agy['window_used_pct']:.0f}% >= 60%) -> Mistral 25€",
+                    "reason": f"Bouclier AGY ({agy['window_used_pct']:.0f}% >= 60%) -> Mistral Vibe (forfait)",
                 }
             if deepseek_ready:
                 return {

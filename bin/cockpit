@@ -90,7 +90,7 @@ from pmo_db import CockpitDB
 
 CockpitDB(Path(os.environ["DB_PATH"])).set_mistral_key_active(True)
 PY
-      echo "OK : Clé MISTRAL_API_KEY enregistrée et voie Mistral 25€/mois ACTIVÉE dans le Gouverneur."
+      echo "OK : Clé MISTRAL_API_KEY enregistrée et voie Mistral Vibe (abonnement forfaitaire) ACTIVÉE dans le Gouverneur."
     else
       echo "OK : Secret $KEY mis à jour dans $ENV_FILE (0600)."
     fi

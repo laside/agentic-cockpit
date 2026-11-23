@@ -246,6 +246,76 @@ class TestScheduler(unittest.TestCase):
         batch = plan_batch(self.db, self.project_id, slots=2)
         self.assertEqual([item["id"] for item in batch], ["T-001"])
 
+    def test_m_overflow_to_mistral_when_agy_busy(self) -> None:
+        """Deux tickets M avec Mistral actif : le 1er part sur agy_standard, le 2e déborde sur mistral_vibe."""
+        self.db.set_mistral_key_active(True)
+        self.db.upsert_ticket(
+            self.project_id, "T-M1", "M1", priority="P1", complexity="M", state="READY", files_owned=["m1.py"]
+        )
+        self.db.upsert_ticket(
+            self.project_id, "T-M2", "M2", priority="P2", complexity="M", state="READY", files_owned=["m2.py"]
+        )
+        lp = {"agy_standard": "agy", "agy_argon": "agy", "mistral_vibe": "mistral", "deepseek_coder": "deepseek"}
+        batch = plan_batch(
+            self.db,
+            self.project_id,
+            slots=2,
+            provider_limits={"agy": 1, "mistral": 2},
+            lane_providers=lp,
+        )
+        self.assertEqual([b["id"] for b in batch], ["T-M1", "T-M2"])
+        self.assertEqual(batch[0]["lane"], "agy_standard")
+        self.assertNotIn("overflow", batch[0])
+        self.assertEqual(batch[1]["lane"], "mistral_vibe")
+        self.assertTrue(batch[1].get("overflow"))
+
+    def test_m_overflow_respects_mistral_max_parallel(self) -> None:
+        """Le débordement M -> mistral_vibe respecte provider_limits['mistral'] = 2."""
+        self.db.set_mistral_key_active(True)
+        for i in range(1, 5):
+            self.db.upsert_ticket(
+                self.project_id,
+                f"T-M{i}",
+                f"M{i}",
+                priority="P2",
+                complexity="M",
+                state="READY",
+                files_owned=[f"m{i}.py"],
+            )
+        lp = {"agy_standard": "agy", "agy_argon": "agy", "mistral_vibe": "mistral", "deepseek_coder": "deepseek"}
+        batch = plan_batch(
+            self.db,
+            self.project_id,
+            slots=4,
+            provider_limits={"agy": 1, "mistral": 2},
+            lane_providers=lp,
+        )
+        self.assertEqual([b["id"] for b in batch], ["T-M1", "T-M2", "T-M3"])
+        self.assertEqual([b["lane"] for b in batch], ["agy_standard", "mistral_vibe", "mistral_vibe"])
+
+    def test_l_and_p0_never_overflow_to_mistral(self) -> None:
+        """Les tickets L et P0 (agy_argon) ne débordent jamais sur mistral_vibe."""
+        self.db.set_mistral_key_active(True)
+        self.db.upsert_ticket(
+            self.project_id, "T-L1", "L1", priority="P1", complexity="L", state="READY", files_owned=["l1.py"]
+        )
+        self.db.upsert_ticket(
+            self.project_id, "T-L2", "L2", priority="P2", complexity="L", state="READY", files_owned=["l2.py"]
+        )
+        self.db.upsert_ticket(
+            self.project_id, "T-P0", "P0", priority="P0", complexity="M", state="READY", files_owned=["p0.py"]
+        )
+        lp = {"agy_standard": "agy", "agy_argon": "agy", "mistral_vibe": "mistral"}
+        batch = plan_batch(
+            self.db,
+            self.project_id,
+            slots=3,
+            provider_limits={"agy": 1, "mistral": 2},
+            lane_providers=lp,
+        )
+        self.assertEqual(len(batch), 1)
+        self.assertEqual(batch[0]["lane"], "agy_argon")
+
 
 if __name__ == "__main__":
     unittest.main()

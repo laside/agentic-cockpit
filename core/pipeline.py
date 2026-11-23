@@ -18,6 +18,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -308,18 +309,54 @@ def worker_prompt(feedback: str) -> str:
     return base + rules
 
 
+def _load_env_file(path: Path) -> dict[str, str]:
+    """Charge un fichier KEY=VALUE (format `cockpit secret`) sans jamais journaliser les valeurs."""
+    if not path.is_file():
+        return {}
+    result: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_val = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        val_str = raw_val.strip()
+        if not val_str:
+            result[key] = ""
+            continue
+        try:
+            tokens = shlex.split(val_str)
+            if len(tokens) == 1:
+                result[key] = tokens[0]
+                continue
+        except ValueError:
+            pass
+        if len(val_str) >= 2 and val_str[0] == val_str[-1] and val_str[0] in ("'", '"'):
+            val_str = val_str[1:-1]
+        result[key] = val_str
+    return result
+
+
 def run_worker(argv: list[str], wt: Path, log_path: Path, timeout: int,
                extra_env: dict[str, str] | None = None, *, stream: bool = True) -> tuple[int, float]:
     """Lance le worker, écrit sa sortie dans le journal et, si `stream`, la recopie à l'écran."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     if shutil.which(argv[0]) is None:
         raise PipelineError(f"CLI introuvable pour cette voie : {argv[0]}")
+    env = dict(os.environ)
+    for k, v in _load_env_file(COCKPIT_HOME / ".env.cockpit").items():
+        env.setdefault(k, v)
+    env["PWD"] = str(wt)
+    if extra_env:
+        env.update(extra_env)
     start = time.time()
     with log_path.open("w", encoding="utf-8") as log:
         # PWD doit suivre cwd : certains CLI (opencode) se fient à la variable et non au répertoire réel.
         proc = subprocess.Popen(
             argv, cwd=str(wt), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            text=True, errors="replace", env=dict(os.environ, PWD=str(wt), **(extra_env or {})),
+            text=True, errors="replace", env=env,
         )
 
         def pump() -> None:
@@ -1559,11 +1596,16 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
 
         results: dict[str, int] = {}
 
-        def _worker(tid: str) -> None:
+        def _worker(item: dict[str, Any]) -> None:
+            tid = item["id"]
             try:
-                results[tid] = run_ticket(
-                    db, projet, tid, max_attempts=args.max_attempts, use_gate1=bool(args.gate1)
-                )
+                run_kwargs: dict[str, Any] = {
+                    "max_attempts": args.max_attempts,
+                    "use_gate1": bool(args.gate1),
+                }
+                if item.get("overflow"):
+                    run_kwargs["lane_override"] = item["lane"]
+                results[tid] = run_ticket(db, projet, tid, **run_kwargs)
             except Exception as exc:
                 say(f"Erreur dans le worker du ticket {tid} : {exc}")
                 try:
@@ -1575,7 +1617,7 @@ def cmd_auto(db: CockpitDB, args: argparse.Namespace) -> int:
                     pass
                 results[tid] = 1
 
-        threads = [threading.Thread(target=_worker, args=(item["id"],)) for item in batch]
+        threads = [threading.Thread(target=_worker, args=(item,)) for item in batch]
         for t in threads:
             t.start()
         for t in threads:

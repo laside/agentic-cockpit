@@ -58,7 +58,9 @@ argv = ["agy", "--model", "Gemini 4 Argon (High)", "--print", "{prompt}", "--mod
 [runners.mistral_vibe]
 agent = "mistral"
 provider = "mistral"
-argv = ["vibe", "--prompt", "{prompt}", "--max-turns", "12"]
+# Abonnement forfaitaire Mistral (0 € marginal) : workers en parallèle (max 2).
+max_parallel = 2
+argv = ["vibe", "--prompt", "{prompt}", "--auto-approve", "--trust", "--max-turns", "30"]
 
 # Claude en headless (abonnement Claude : à réserver aux sous-tickets où il apporte quelque chose).
 # Jamais choisi par le Gouverneur : `cockpit run T-xxx <projet> --lane claude_haiku`.

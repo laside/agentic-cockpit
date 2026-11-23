@@ -34,6 +34,23 @@ class GovernorTests(unittest.TestCase):
     def test_s_par_defaut(self) -> None:
         self.assertEqual(self._lane("S"), "deepseek_coder")
 
+    def test_s_avec_mistral(self) -> None:
+        self.db.set_mistral_key_active(True)
+        self.assertEqual(self._lane("S"), "mistral_vibe")
+
+    def test_s_mistral_actif_deepseek_epuise(self) -> None:
+        self.db.set_mistral_key_active(True)
+        self.db.update_quota_usage("deepseek", add_spent_eur=19.5)
+        self.assertEqual(self._lane("S"), "mistral_vibe")
+
+    def test_mistral_forfait_limite_zero(self) -> None:
+        self.db.set_mistral_key_active(True)
+        with self.db._connect() as conn:
+            conn.execute("UPDATE quota_state SET monthly_limit_eur = 0.0 WHERE provider = 'mistral'")
+        self.assertTrue(self.db.is_mistral_ready())
+        self.assertEqual(self._lane("XS"), "mistral_vibe")
+        self.assertEqual(self._lane("S"), "mistral_vibe")
+
     def test_m_agy_a_zero(self) -> None:
         self.assertEqual(self._lane("M"), "agy_standard")
 
