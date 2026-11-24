@@ -674,7 +674,7 @@ class CockpitDB:
         if (fail_count >= 2 or complexity == "L" or priority == "P0") and agy_argon_ok:
             return {
                 "lane": "agy_argon",
-                "cli": "agy --model argon",
+                "cli": "agy --model 'Gemini 4 Hydrogen (High)'",
                 "tdd_prep": "nas-gemma4-32k",
                 "gate0_fixer": "local-small (RTX 3070)",
                 "gate1_audit": "nas-gemma4-32k",

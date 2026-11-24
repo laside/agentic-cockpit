@@ -23,5 +23,5 @@ subscriptions:
     window_hours: 5
     soft_cap_pct: 60.0
     hard_cap_pct: 85.0
-    cmd_standard: "agy"
-    cmd_argon: "agy --model argon"
+    cmd_standard: "agy --model 'Gemini 4 Neon (Medium)'"
+    cmd_argon: "agy --model 'Gemini 4 Hydrogen (High)'"
