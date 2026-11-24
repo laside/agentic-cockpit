@@ -183,11 +183,20 @@ def stage_paths(wt: Path, paths: list[str]) -> None:
         sh(["git", "rm", "-q", "--cached", "--ignore-unmatch", "--", *missing], wt)
 
 
-def ensure_worktree(proj: dict[str, Any], ticket_id: str, parent_id: str = "") -> Path:
+def ensure_worktree(proj: dict[str, Any], ticket_id: str, parent_id: str = "",
+                    db: CockpitDB | None = None) -> Path:
     root = Path(proj["root_path"])
     wt = Path(proj["wt_tickets_dir"]) / ticket_id
     branch = f"feat/{ticket_id}"
     parent_id = (parent_id or "").strip()
+    if db is not None:
+        holder = db.active_worktree_lock(str(proj.get("id") or ""), str(wt), exclude_ticket_id=ticket_id)
+        if holder is not None:
+            who = f"pid {holder['pid']}" if holder["pid"] is not None else "mode interactif"
+            raise PipelineError(
+                f"worktree {wt} déjà actif (ticket {holder['ticket_id']}, {who}) : "
+                "un seul worker actif par worktree."
+            )
     with _GIT_WORKTREE_LOCK:
         if wt.exists():
             return wt
@@ -590,7 +599,7 @@ def run_ticket(db: CockpitDB, project_id: str, ticket_id: str, lane_override: st
             raise PipelineError("Fichiers déjà verrouillés : " + ", ".join(conflicts))
 
         parent_id = (ticket.get("parent_id") or "").strip()
-        wt = ensure_worktree(proj, ticket_id, parent_id)
+        wt = ensure_worktree(proj, ticket_id, parent_id, db=db)
         brief_path = write_brief(ticket, wt, db)
         base_ref = f"feat/{parent_id}" if parent_id else proj["default_branch"]
         base = sh(["git", "merge-base", "HEAD", base_ref], wt).stdout.strip()
@@ -713,6 +722,7 @@ def run_ticket(db: CockpitDB, project_id: str, ticket_id: str, lane_override: st
         return 1
     finally:
         db.unclaim_ticket(project_id, ticket_id)
+        db.release_worktree_lock(project_id, ticket_id)
 
 
 def claim_ticket(db: CockpitDB, project_id: str, ticket_id: str, owner: str) -> int:
@@ -747,6 +757,12 @@ def claim_ticket(db: CockpitDB, project_id: str, ticket_id: str, owner: str) -> 
         if cur.rowcount != 1:
             conn.rollback()
             raise PipelineError(f"{ticket_id} n'est plus à l'état READY : claim refusé.")
+        # Verrou de worktree posé dans la même transaction que le passage à ASSIGNED
+        # (pid NULL = mode interactif, comme claimed_pid : pas de reaper).
+        wt_msg = db.acquire_worktree_lock_tx(conn, project_id, ticket_id, None)
+        if wt_msg:
+            conn.rollback()
+            raise PipelineError(f"{ticket_id} : {wt_msg} : claim refusé.")
         conn.commit()
     except Exception:
         if conn.in_transaction:
@@ -757,7 +773,7 @@ def claim_ticket(db: CockpitDB, project_id: str, ticket_id: str, owner: str) -> 
 
     ticket = db.get_ticket(project_id, ticket_id) or ticket
     parent_id = (ticket.get("parent_id") or "").strip()
-    wt = ensure_worktree(proj, ticket_id, parent_id)
+    wt = ensure_worktree(proj, ticket_id, parent_id, db=db)
     write_brief(ticket, wt, db)
     db.add_event(project_id, ticket_id, "CLAIMED", f"owner={owner} lane=interactive")
     say(f"{ticket_id} pris en charge par {owner} — lire {BRIEF_NAME} avant toute modification.")
@@ -799,19 +815,23 @@ def submit_ticket(db: CockpitDB, project_id: str, ticket_id: str) -> int:
         exit_code=0,
         duration_s=0.0,
     )
-    verdict, _ = _post_worker_gates(
-        db, proj, ticket, wt, base, log_dir, cfg, run_fields, set(),
-        use_gate1=False,
-        allow_gate1_rework=False,
-        worker_failed=False,
-        success_event="SUBMITTED",
-        keep_assigned_on_fail=True,
-    )
-    if verdict == "SECRET":
-        return 2
-    if verdict == "FAIL":
-        return 1
-    return 0
+    try:
+        verdict, _ = _post_worker_gates(
+            db, proj, ticket, wt, base, log_dir, cfg, run_fields, set(),
+            use_gate1=False,
+            allow_gate1_rework=False,
+            worker_failed=False,
+            success_event="SUBMITTED",
+            keep_assigned_on_fail=True,
+        )
+        if verdict == "SECRET":
+            return 2
+        if verdict == "FAIL":
+            return 1
+        return 0
+    finally:
+        # Submit terminé (succès, refus ou secret) : plus aucun worker actif sur ce worktree.
+        db.release_worktree_lock(project_id, ticket_id)
 
 
 def demote_tickets(db: CockpitDB, project_id: str, ticket_ids: list[str]) -> list[str]:
@@ -861,6 +881,7 @@ def release_ticket(db: CockpitDB, project_id: str, ticket_id: str) -> int:
     db.update_ticket(project_id, ticket_id, state="READY", owner="auto", lane="")
     db.unclaim_ticket(project_id, ticket_id)
     db.release_locks(project_id, ticket_id)
+    db.release_worktree_lock(project_id, ticket_id)
     db.add_event(project_id, ticket_id, "RELEASED", f"rendu par {ticket.get('owner') or 'interactive'}")
     say(f"{ticket_id} relâché : état READY, verrous libérés (worktree conservé).")
     return 0
@@ -941,6 +962,7 @@ def abandon_ticket(db: CockpitDB, project_id: str, ticket_id: str, reason: str =
         sh(["git", "branch", "-D", branch], root, check=False)
         db.release_locks(project_id, tid)
         db.unclaim_ticket(project_id, tid)
+        db.release_worktree_lock(project_id, tid)
         db.update_ticket(project_id, tid, state="ABANDONED")
         db.add_event(project_id, tid, "ABANDONED", motif)
         abandoned.append(tid)
