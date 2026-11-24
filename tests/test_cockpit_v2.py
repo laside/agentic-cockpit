@@ -85,7 +85,7 @@ class TestAgenticCockpitV2(unittest.TestCase):
 
         route_argon = self.db.select_optimal_lane(complexity="M", priority="P2", fail_count=2)
         self.assertEqual(route_argon["lane"], "agy_argon")
-        self.assertEqual(route_argon["cli"], "agy --model argon")
+        self.assertEqual(route_argon["cli"], "agy --model 'Gemini 4 Hydrogen (High)'")
 
     def test_03_pmo_dag_and_critical_path_ordering(self) -> None:
         self.db.register_project(

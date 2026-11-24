@@ -36,7 +36,7 @@ window_hours = 5.0
 estimated_cost_eur = 0.0
 estimated_tokens_in = 0
 estimated_tokens_out = 0
-argv = ["agy", "--print", "{prompt}", "--mode", "accept-edits", "--output-format", "json"]
+argv = ["agy", "--model", "Gemini 4 Neon (Medium)", "--print", "{prompt}", "--mode", "accept-edits", "--output-format", "json"]
 
 [runners.agy_argon]
 agent = "agy"
@@ -53,7 +53,7 @@ estimated_cost_eur = 0.0
 estimated_tokens_in = 0
 estimated_tokens_out = 0
 # Nom exact attendu par `agy --model` (voir la liste affichée par agy en cas de nom inconnu).
-argv = ["agy", "--model", "Gemini 4 Argon (High)", "--print", "{prompt}", "--mode", "accept-edits", "--output-format", "json"]
+argv = ["agy", "--model", "Gemini 4 Hydrogen (High)", "--print", "{prompt}", "--mode", "accept-edits", "--output-format", "json"]
 
 [runners.mistral_vibe]
 agent = "mistral"
