@@ -41,6 +41,49 @@ for p in panes:
 ')"
 [ -n "$PANE_ID" ] || { echo "Panneau '$PANE_PREFIX' introuvable dans la session $SESSION. Lancer à la main : $RUN_CMD" >&2; exit 1; }
 
+# Le panneau cible doit exécuter un shell INACTIF : commande courante du panneau (via zellij),
+# ou à défaut absence de processus enfant au premier plan (pid du panneau sans enfant dans /proc).
+PANE_IDLE="$(printf '%s\n' "$PANES_JSON" | PANE_ID="$PANE_ID" python3 -c '
+import json, os, sys
+SHELLS = {"bash", "zsh", "sh", "dash", "fish", "nu", "ksh", "pwsh", "powershell"}
+try:
+    panes = json.loads(sys.stdin.read() or "[]")
+    target = str(os.environ["PANE_ID"])
+    for p in panes:
+        if not isinstance(p, dict) or str(p.get("id")) != target:
+            continue
+        cc = p.get("current_command", p.get("command"))
+        if isinstance(cc, dict):
+            cc = cc.get("cmd") or cc.get("name") or ""
+        if cc is not None:
+            txt = str(cc).strip()
+            base = os.path.basename(txt.split()[0]) if txt else ""
+            print("IDLE" if (not base or base in SHELLS) else f"BUSY commande={txt}")
+            break
+        pid = p.get("pid")
+        if pid:
+            try:
+                with open(f"/proc/{int(pid)}/task/{int(pid)}/children", encoding="ascii") as fh:
+                    enfants = fh.read().split()
+            except OSError:
+                enfants = ["inconnu"]
+            print("IDLE" if not enfants else "BUSY processus-enfant-au-premier-plan")
+            break
+        print("BUSY etat-du-panneau-inconnu")
+        break
+    else:
+        print("BUSY panneau-introuvable")
+except Exception as exc:
+    print(f"BUSY erreur={exc}")
+')"
+case "$PANE_IDLE" in
+  IDLE) ;;
+  *)
+    echo "Panneau '$PANE_PREFIX' non inactif ($PANE_IDLE) dans la session $SESSION : rien n'a été envoyé. Lancer à la main : $RUN_CMD" >&2
+    exit 1
+    ;;
+esac
+
 zellij --session "$SESSION" action write-chars --pane-id "terminal_$PANE_ID" "$RUN_CMD"
 sleep 0.3
 zellij --session "$SESSION" action send-keys --pane-id "terminal_$PANE_ID" Enter

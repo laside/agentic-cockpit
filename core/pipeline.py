@@ -720,6 +720,15 @@ def run_ticket(db: CockpitDB, project_id: str, ticket_id: str, lane_override: st
         db.add_event(project_id, ticket_id, "ESCALATED", f"{max_attempts} tentatives sans succès")
         say(f"{ticket_id} : {max_attempts} tentatives sans succès — escalade (état GATE2). Dernier retour :\n{feedback}")
         return 1
+    except Exception:
+        # Échec avant le démarrage d'un worker : aucun chemin ne doit laisser un ticket
+        # ASSIGNED avec une voie vide (état orphelin) — retour à READY, verrous libérés.
+        t = db.get_ticket(project_id, ticket_id)
+        if t and t.get("state") == "ASSIGNED" and not (t.get("lane") or "").strip():
+            db.update_ticket(project_id, ticket_id, state="READY", owner="auto", lane="")
+            db.release_locks(project_id, ticket_id)
+            db.add_event(project_id, ticket_id, "RUN_ABORTED", "aucun worker démarré : retour à READY")
+        raise
     finally:
         db.unclaim_ticket(project_id, ticket_id)
         db.release_worktree_lock(project_id, ticket_id)
@@ -866,14 +875,17 @@ def demote_tickets(db: CockpitDB, project_id: str, ticket_ids: list[str]) -> lis
 
 
 def release_ticket(db: CockpitDB, project_id: str, ticket_id: str) -> int:
-    """Relâche un ticket interactif ASSIGNED : remet à READY, libère les verrous et conserve le worktree."""
+    """Relâche un ticket interactif ASSIGNED (ou orphelin, sans voie ni pid vivant) :
+    remet à READY, libère les verrous et conserve le worktree."""
     proj = db.get_project(project_id)
     ticket = db.get_ticket(project_id, ticket_id)
     if not proj:
         raise PipelineError(f"Projet inconnu : {project_id}")
     if not ticket:
         raise PipelineError(f"Ticket inconnu : {ticket_id} (projet {project_id})")
-    if ticket["state"] != "ASSIGNED" or ticket.get("lane") != "interactive":
+    lane = (ticket.get("lane") or "").strip()
+    orphan = ticket["state"] == "ASSIGNED" and not lane and not _is_pid_alive(ticket.get("claimed_pid"))
+    if ticket["state"] != "ASSIGNED" or (lane != "interactive" and not orphan):
         raise PipelineError(
             f"{ticket_id} doit être à l'état ASSIGNED sur la voie 'interactive'"
             f" (actuel : state={ticket['state']}, lane={ticket.get('lane')!r})."
@@ -882,7 +894,10 @@ def release_ticket(db: CockpitDB, project_id: str, ticket_id: str) -> int:
     db.unclaim_ticket(project_id, ticket_id)
     db.release_locks(project_id, ticket_id)
     db.release_worktree_lock(project_id, ticket_id)
-    db.add_event(project_id, ticket_id, "RELEASED", f"rendu par {ticket.get('owner') or 'interactive'}")
+    detail = f"rendu par {ticket.get('owner') or 'interactive'}"
+    if orphan:
+        detail += " — état orphelin (ASSIGNED sans voie ni pid vivant)"
+    db.add_event(project_id, ticket_id, "RELEASED", detail)
     say(f"{ticket_id} relâché : état READY, verrous libérés (worktree conservé).")
     return 0
 
@@ -1438,11 +1453,14 @@ def brief_project(db: CockpitDB, project_id: str) -> str:
     return "\n".join(lines[:30])
 
 
-def _format_status_ticket(t: dict[str, Any], indent: str = "") -> str:
+def _format_status_ticket(t: dict[str, Any], indent: str = "", project_id: str = "") -> str:
     owner = t.get("owner") or "auto"
     lane = t.get("lane") or "-"
     title = (t.get("title") or "")[:50]
-    return f"{indent}{t['id']} {t['state']} {owner} {lane} {title}"
+    line = f"{indent}{t['id']} {t['state']} {owner} {lane} {title}"
+    if t.get("state") == "ASSIGNED" and not (t.get("lane") or "").strip() and not _is_pid_alive(t.get("claimed_pid")):
+        line += f" — ORPHELIN (sans voie ni pid vivant), lancer : cockpit release {t['id']} {project_id}"
+    return line
 
 
 def build_status(db: CockpitDB, project_id: str, max_events: int = 8) -> str:
@@ -1450,7 +1468,7 @@ def build_status(db: CockpitDB, project_id: str, max_events: int = 8) -> str:
     queue = db.get_prioritized_queue(project_id)
 
     active = [t for t in queue if t.get("state") in ACTIVE_STATES]
-    pr_open_lines = [_format_status_ticket(t) for t in queue if t.get("state") == "PR_OPEN"]
+    pr_open_lines = [_format_status_ticket(t, project_id=project_id) for t in queue if t.get("state") == "PR_OPEN"]
     children_by_parent: dict[str, list[dict[str, Any]]] = {}
     for t in active:
         pid = (t.get("parent_id") or "").strip()
@@ -1462,13 +1480,13 @@ def build_status(db: CockpitDB, project_id: str, max_events: int = 8) -> str:
     for t in active:
         if (t.get("parent_id") or "").strip():
             continue
-        work_lines.append(_format_status_ticket(t))
+        work_lines.append(_format_status_ticket(t, project_id=project_id))
         for child in children_by_parent.get(t["id"], []):
-            work_lines.append(_format_status_ticket(child, indent="  "))
+            work_lines.append(_format_status_ticket(child, indent="  ", project_id=project_id))
     for pid, orphans in children_by_parent.items():
         if pid not in top_active_ids:
             for child in orphans:
-                work_lines.append(_format_status_ticket(child, indent="  "))
+                work_lines.append(_format_status_ticket(child, indent="  ", project_id=project_id))
 
     with db._connect() as conn:
         lock_rows = conn.execute(
