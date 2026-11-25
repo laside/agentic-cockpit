@@ -121,15 +121,73 @@ def _appel_juge(
     return verdict, defects, info
 
 
+def _vote_juge(
+    argv: list[str],
+    timeout: int,
+) -> tuple[str, list[str], dict[str, Any]]:
+    """Un vote du juge : un appel, plus une relance si la réponse est mal formée."""
+    verdict, defects, info = _appel_juge(argv, timeout)
+    if verdict == "SKIPPED" and defects and defects[0] in _RAISONS_MALFORMEES:
+        verdict2, defects2, info2 = _appel_juge(argv, timeout)
+        return verdict2, defects2, _ajoute_info(info, info2)
+    return verdict, defects, info
+
+
+def _defauts_des_votes(votes: list[tuple[str, list[str]]], verdict: str) -> list[str]:
+    """Défauts des votes ayant rendu `verdict`, dans l'ordre des appels."""
+    defs: list[str] = []
+    for v, ds in votes:
+        if v == verdict:
+            defs.extend(str(d) for d in ds)
+    return defs
+
+
+def verdict_majoritaire(
+    votes: list[tuple[str, list[str]]],
+    nb_votes: int = 1,
+) -> tuple[str, list[str]]:
+    """Agrège les votes (verdict, defects) d'un jugement en un verdict unique.
+
+    `nb_votes` > 1 (vote majoritaire) : un vote SKIPPED n'est jamais compté
+    comme PASS ; s'il n'y a pas de majorité PASS ou FAIL parmi les votes
+    valides, le verdict est SKIPPED.
+    `nb_votes` <= 1 : comportement historique, l'unanimité des votes est exigée.
+    Les défauts renvoyés sont ceux des votes du verdict retenu.
+    """
+    nb = max(int(nb_votes or 1), 1)
+    if nb <= 1:
+        if votes and all(v == "FAIL" for v, _ in votes):
+            return "FAIL", _defauts_des_votes(votes, "FAIL") or ["verdict FAIL sans détail"]
+        if votes and all(v == "PASS" for v, _ in votes):
+            return "PASS", _defauts_des_votes(votes, "PASS")
+        return "SKIPPED", _defauts_des_votes(votes, "SKIPPED") or ["aucun vote unanime"]
+    # Majorité absolue sur le nombre de votes prévu (2 sur 3) : un PASS isolé entre
+    # des votes SKIPPED (timeouts) ne valide pas un diff ; il part en revue humaine.
+    seuil = nb // 2 + 1
+    nb_pass = sum(1 for v, _ in votes if v == "PASS")
+    nb_fail = sum(1 for v, _ in votes if v == "FAIL")
+    if nb_pass >= seuil:
+        return "PASS", _defauts_des_votes(votes, "PASS")
+    if nb_fail >= seuil:
+        return "FAIL", _defauts_des_votes(votes, "FAIL") or ["verdict FAIL sans détail"]
+    return (
+        "SKIPPED",
+        _defauts_des_votes(votes, "SKIPPED") or ["aucune majorité parmi les votes valides"],
+    )
+
+
 def judge_diff(
     brief: str,
     diff: str,
     cfg: dict[str, Any],
     timeout: int = 120,
 ) -> tuple[str, list[str], dict[str, Any]]:
-    """Audite un diff contre le brief du ticket via Claude Haiku headless.
+    """Audite un diff contre le brief du ticket via Claude headless.
 
-    Retourne (verdict, defects, info) avec verdict dans PASS | FAIL | SKIPPED.
+    Fait `cfg["judge_votes"]` appels (1 par défaut) et rend le verdict
+    majoritaire ; dès qu'une majorité est acquise, les appels restants ne
+    sont pas lancés. Retourne (verdict, defects, info) avec verdict dans
+    PASS | FAIL | SKIPPED.
     """
     info = _empty_info()
     max_chars = int(cfg.get("judge_max_diff_chars", 45000))
@@ -167,10 +225,17 @@ def judge_diff(
         sys_prompt,
     ]
 
-    verdict, defects, info = _appel_juge(argv, timeout)
+    nb_votes = max(int(cfg.get("judge_votes", 1) or 1), 1)
+    seuil = nb_votes // 2 + 1
+    votes: list[tuple[str, list[str]]] = []
+    for _ in range(nb_votes):
+        verdict_vote, defects_vote, info_vote = _vote_juge(argv, timeout)
+        votes.append((verdict_vote, defects_vote))
+        info = _ajoute_info(info, info_vote)
+        nb_pass = sum(1 for v, _ in votes if v == "PASS")
+        nb_fail = sum(1 for v, _ in votes if v == "FAIL")
+        if nb_pass >= seuil or nb_fail >= seuil:
+            break  # majorité acquise : les appels restants ne sont pas lancés
 
-    if verdict == "SKIPPED" and defects and defects[0] in _RAISONS_MALFORMEES:
-        verdict2, defects2, info2 = _appel_juge(argv, timeout)
-        return verdict2, defects2, _ajoute_info(info, info2)
-
+    verdict, defects = verdict_majoritaire(votes, nb_votes)
     return verdict, defects, info

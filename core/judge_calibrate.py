@@ -76,6 +76,7 @@ def calibrate(
     base = Path(cases_dir)
     entrees = json.loads((base / "cases.json").read_text(encoding="utf-8"))
     nb_runs = max(int(runs), 1)
+    nb_votes = max(int(cfg.get("judge_votes", 1) or 1), 1)
     juge = judge if judge is not None else judge_mod.judge_diff
 
     cas_resultats: list[dict[str, Any]] = []
@@ -100,18 +101,23 @@ def calibrate(
             defects_par_passe.append(motifs)
         secondes = time.monotonic() - debut
 
+        # Même règle de majorité par cas que judge_diff (fonction partagée).
+        verdict_cas, _ = judge_mod.verdict_majoritaire(
+            list(zip(verdicts, defects_par_passe)), nb_votes
+        )
+
         if attendu == "FAIL":
             bad_total += 1
-            ok = all(v == "FAIL" for v in verdicts)
+            ok = verdict_cas == "FAIL"
             if ok:
                 detected += 1
         else:
             good_total += 1
-            ok = all(v == "PASS" for v in verdicts)
-            if any(v == "FAIL" for v in verdicts):
+            ok = verdict_cas == "PASS"
+            if verdict_cas == "FAIL":
                 false_positives += 1
 
-        if any(v == "SKIPPED" for v in verdicts):
+        if verdict_cas == "SKIPPED" or any(v == "SKIPPED" for v in verdicts):
             skipped += 1
 
         cas_resultats.append(
@@ -119,6 +125,7 @@ def calibrate(
                 "name": nom,
                 "expected": attendu,
                 "verdicts": verdicts,
+                "verdict": verdict_cas,
                 "defects": defects_par_passe,
                 "ok": ok,
                 "seconds": secondes,
@@ -143,6 +150,7 @@ def calibrate(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "runs": nb_runs,
         "judge_model": str(cfg.get("judge_model", "")),
+        "judge_votes": nb_votes,
     }
 
 
@@ -209,6 +217,34 @@ def calibration_status(
     bad_total = int(data.get("bad_total") or 0)
     if runs < 3 or bad_total < 10:
         return False, f"calibration trop légère (runs={runs}, cas={bad_total})"
+
+    # Critère 4 : la calibration doit avoir été faite avec le judge_model et le
+    # judge_votes de la config courante, comparaison faite dans tous les cas.
+    # Un rapport sans la clé judge_votes (antérieur à T-060) vaut judge_votes=1
+    # (un seul appel par cas) et est refusé si la config courante vote autrement.
+    cfg = _charger_gate1(RUNNERS_PATH)
+    modele_courant = str(cfg.get("judge_model", "haiku"))
+    votes_courants = max(int(cfg.get("judge_votes", 1) or 1), 1)
+    modele_rapport = data.get("judge_model")
+    if not modele_rapport:
+        return False, "calibration sans judge_model : modèle du juge inconnu"
+    if str(modele_rapport) != modele_courant:
+        return False, (
+            f"calibration faite avec un autre judge_model "
+            f"({modele_rapport!r} au lieu de {modele_courant!r})"
+        )
+    if "judge_votes" in data:
+        try:
+            votes_rapport = int(data.get("judge_votes") or 0)
+        except (TypeError, ValueError):
+            votes_rapport = 0
+    else:
+        votes_rapport = 1  # rapport d'avant T-060 : un seul appel par cas
+    if votes_rapport != votes_courants:
+        return False, (
+            f"calibration faite avec un autre judge_votes "
+            f"({votes_rapport} au lieu de {votes_courants})"
+        )
 
     return True, ""
 

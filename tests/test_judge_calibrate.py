@@ -275,8 +275,14 @@ class TestCalibrate(unittest.TestCase):
         prompt_file = self.base / "sys_judge_claude.md"
         prompt_file.write_text("prompt officiel", encoding="utf-8")
         rapport_path = self.base / "judge-calibration.json"
+        # Config isolée : sans elle, le test lirait la config réelle de la machine.
+        config_path = self.base / "runners.toml"
+        config_path.write_text('[gate1]\njudge_model = "haiku"\n', encoding="utf-8")
 
-        with mock.patch.object(judge_calibrate, "PROMPT_PATH", prompt_file):
+        with (
+            mock.patch.object(judge_calibrate, "PROMPT_PATH", prompt_file),
+            mock.patch.object(judge_calibrate, "RUNNERS_PATH", config_path),
+        ):
             sha_actuel = judge_calibrate._prompt_sha256()
 
             # 1. Rapport absent

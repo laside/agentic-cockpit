@@ -106,6 +106,7 @@ backend = "claude"               # "claude" (juge Haiku headless) ou "ollama" (a
 judge_model = "haiku"            # modèle Claude utilisé par le juge de revue
 judge_timeout_s = 120            # durée maximale d'un appel au juge Claude (secondes)
 judge_max_diff_chars = 45000     # taille maximale du diff en caractères avant SKIPPED sans appel
+judge_votes = 3                  # nombre impair d'appels du juge, verdict majoritaire (1 = un seul appel, comportement historique)
 url = "http://127.0.0.1:11434"
 model = "Gemma4-ctx:32k"
 think = false            # 2 à 4 s sans réflexion, verdicts corrects ; plusieurs minutes avec
