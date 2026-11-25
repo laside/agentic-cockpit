@@ -80,6 +80,21 @@ def is_secret_or_forbidden_path(rel_path: str) -> bool:
     return False
 
 
+def pid_alive(pid: Any) -> bool:
+    """Vivacité d'un pid (même semantics que claimed_pid) : None -> False, PermissionError -> True."""
+    if pid is None:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def validate_projects_ports(projects_toml_path: Path) -> list[str]:
     """Mitigation #3 (T-104) : Détecte toute collision de ports entre projets dans projects.toml."""
     data = parse_toml_text(projects_toml_path.read_text(encoding="utf-8"))
@@ -166,6 +181,15 @@ class CockpitDB:
                     ticket_id TEXT NOT NULL,
                     locked_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (project_id, file_path)
+                );
+
+                CREATE TABLE IF NOT EXISTS worktree_locks (
+                    project_id TEXT NOT NULL,
+                    worktree_path TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    pid INTEGER,
+                    locked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (project_id, worktree_path)
                 );
 
                 CREATE TABLE IF NOT EXISTS quota_state (
@@ -421,8 +445,82 @@ class CockpitDB:
                 "DELETE FROM file_locks WHERE project_id = ? AND ticket_id = ?", (project_id, ticket_id)
             )
 
-    def claim_ticket(self, project_id: str, ticket_id: str, pid: int) -> tuple[bool, str]:
-        """Prend en charge un ticket de manière atomique (BEGIN IMMEDIATE)."""
+    def worktree_lock_path(self, conn: sqlite3.Connection, project_id: str, ticket_id: str) -> str:
+        """Chemin normalisé du worktree d'un ticket, lu dans la transaction courante."""
+        row = conn.execute(
+            "SELECT wt_tickets_dir FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Projet inconnu : {project_id}")
+        return os.path.normpath(str(Path(row["wt_tickets_dir"]) / ticket_id))
+
+    def acquire_worktree_lock_tx(
+        self,
+        conn: sqlite3.Connection,
+        project_id: str,
+        ticket_id: str,
+        pid: int | None,
+    ) -> str:
+        """Pose le verrou de worktree DANS la transaction courante (BEGIN IMMEDIATE).
+
+        Retourne "" si le verrou est posé (ou déjà détenu par ce ticket/pid), sinon un
+        message de refus explicite. Un pid mort est reapé ; un pid NULL = mode interactif
+        (pas de reaper). Un seul worker actif par worktree.
+        """
+        worktree_path = self.worktree_lock_path(conn, project_id, ticket_id)
+        row = conn.execute(
+            "SELECT ticket_id, pid FROM worktree_locks WHERE project_id = ? AND worktree_path = ?",
+            (project_id, worktree_path),
+        ).fetchone()
+        if row is not None:
+            old_ticket = row["ticket_id"]
+            old_pid = row["pid"]
+            if old_ticket == ticket_id and (pid is None or old_pid is None or int(old_pid) == int(pid)):
+                return ""
+            if old_pid is None or pid_alive(old_pid):
+                holder = f"ticket {old_ticket}" + (f", pid {old_pid}" if old_pid is not None else ", mode interactif")
+                return (
+                    f"worktree {worktree_path} déjà actif ({holder}) : "
+                    "un seul worker actif par worktree."
+                )
+            # pid mort : reaper, le verrou est repris ci-dessous.
+        conn.execute(
+            "INSERT OR REPLACE INTO worktree_locks (project_id, worktree_path, ticket_id, pid) VALUES (?, ?, ?, ?)",
+            (project_id, worktree_path, ticket_id, pid),
+        )
+        return ""
+
+    def release_worktree_lock(self, project_id: str, ticket_id: str) -> None:
+        """Libère le verrou de worktree d'un ticket (submit, abandon, release, échec)."""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM worktree_locks WHERE project_id = ? AND ticket_id = ?",
+                (project_id, ticket_id),
+            )
+
+    def active_worktree_lock(
+        self, project_id: str, worktree_path: str, exclude_ticket_id: str = ""
+    ) -> dict[str, Any] | None:
+        """Verrou de worktree actif (pid vivant ou mode interactif) pour ce chemin, hors `exclude_ticket_id`."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM worktree_locks WHERE project_id = ? AND worktree_path = ?",
+                (project_id, os.path.normpath(str(worktree_path))),
+            ).fetchone()
+        if not row:
+            return None
+        if exclude_ticket_id and row["ticket_id"] == exclude_ticket_id:
+            return None
+        if row["pid"] is not None and not pid_alive(row["pid"]):
+            return None
+        return dict(row)
+
+    def claim_ticket(self, project_id: str, ticket_id: str, pid: int | None) -> tuple[bool, str]:
+        """Prend en charge un ticket de manière atomique (BEGIN IMMEDIATE).
+
+        Le verrou de worktree est posé dans la même transaction que le changement
+        d'état : un second worker sur un worktree déjà actif est refusé.
+        """
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -435,6 +533,10 @@ class CockpitDB:
                 return False, "état inconnu"
             state = row["state"]
             if state == "READY":
+                wt_msg = self.acquire_worktree_lock_tx(conn, project_id, ticket_id, pid)
+                if wt_msg:
+                    conn.rollback()
+                    return False, wt_msg
                 conn.execute(
                     "UPDATE tickets SET state = 'ASSIGNED', claimed_pid = ?, updated_at = CURRENT_TIMESTAMP "
                     "WHERE project_id = ? AND id = ?",
@@ -450,6 +552,10 @@ class CockpitDB:
                 try:
                     os.kill(int(claimed_pid), 0)
                 except ProcessLookupError:
+                    wt_msg = self.acquire_worktree_lock_tx(conn, project_id, ticket_id, pid)
+                    if wt_msg:
+                        conn.rollback()
+                        return False, wt_msg
                     conn.execute(
                         "UPDATE tickets SET claimed_pid = ?, updated_at = CURRENT_TIMESTAMP "
                         "WHERE project_id = ? AND id = ?",
